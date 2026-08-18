@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# 编译中间产物
+build/obj/
+
+# MSVC 链接副产品（.lib/.exp 随 DLL 生成在 lib/）
+lib/*.exp
+lib/*.lib
+
+# 编辑器临时文件
+.vs/
+*.user

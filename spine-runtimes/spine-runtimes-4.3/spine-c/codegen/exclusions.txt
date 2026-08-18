@@ -1,0 +1,79 @@
+# Excluded types (whole type is skipped)
+type: Triangulator
+type: SpineObject
+type: TextureLoader
+type: DebugExtension
+type: DefaultSpineExtension
+type: SpineExtension
+type: Updateable
+type: Pair
+type: EventListener
+type: AnimationStateListener
+type: AnimationStateListenerObject
+type: Pool
+type: ArrayUtils
+type: BlockAllocator
+type: Block
+type: MathUtil
+type: Array
+type: PoolObject
+type: HasRendererObject
+type: String
+type: StringBuffer
+type: EventQueue
+type: Json
+type: BaseTimeline
+
+# We handle those in extensions.cpp through more idiomatic means
+method: AnimationState::setListener
+method: AnimationState::addListener
+method: AnimationState::removeListener
+method: AnimationState::clearListeners
+method: TrackEntry::setListener
+method: TrackEntry::getListener
+method: Atlas::Atlas
+
+# Used in UE4, not used anywhere else
+method: AnimationState::setRendererObject
+method: TrackEntry::setRendererObject
+
+# Array<String> returning methods and fields not supported
+method: AttachmentTimeline::getAttachmentNames
+method: Skin::findNamesForSlot
+
+# Interpolation built-in singletons are exposed but should not be constructed or disposed through C.
+method: Interpolation::Interpolation
+method: Interpolation::~Interpolation
+method: AtlasRegion::getNames
+method: AtlasRegion::setNames
+
+# Array<Array<T>> returning methods not supported
+method: DeformTimeline::getVertices
+method: DrawOrderTimeline::getDrawOrders
+method: DrawOrderFolderTimeline::getDrawOrders
+
+# Can not emulate AttachmentMap::Entries, as that's stack allocated
+method: Skin::getAttachments
+
+# Method/type name conflicts
+method: Bone::pose
+
+# Methods that return objects by value (not supported - would need heap allocation)
+method: Color::valueOf
+method: DrawOrderTimeline::getPropertyId
+
+# Exclude const versions of getSetupPose() - we'll only expose the non-const version
+method: BoneData::getSetupPose const
+method: ConstraintDataGeneric::getSetupPose const
+method: IkConstraintData::getSetupPose const
+method: PathConstraintData::getSetupPose const
+method: PhysicsConstraintData::getSetupPose const
+method: PosedDataGeneric::getSetupPose const
+method: SliderData::getSetupPose const
+method: SlotData::getSetupPose const
+method: TransformConstraintData::getSetupPose const
+
+# Exclude setters and constructor for RenderCommand
+method: RenderCommand::RenderCommand
+field-set: RenderCommand
+

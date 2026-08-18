@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "headless test (cpp)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/headless-test",
+            "args": [
+                "${workspaceFolder}/../examples/spineboy/export/spineboy-pro.json",
+                "${workspaceFolder}/../examples/spineboy/export/spineboy-pma.atlas",
+                "run"
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "lldb",
+            "preLaunchTask": "CMake: build"
+        }
+    ]
+}

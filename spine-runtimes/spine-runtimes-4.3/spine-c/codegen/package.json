@@ -1,0 +1,14 @@
+{
+  "name": "spine-c-codegen",
+  "type": "module",
+  "scripts": {
+    "generate": "npx tsx src/index.ts",
+    "null-analysis": "npx tsx src/null-analysis.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript-formatter": "^7.2.2",
+    "@biomejs/biome": "^2.1.1"
+  }
+}
