@@ -1,4 +1,4 @@
-# spine-renpy
+# renpy-spine-plugin
 
 **注：AI构史，谨慎使用。**
 
@@ -7,7 +7,7 @@
 
 ## 目录
 
-- [spine-renpy](#spine-renpy)
+- [renpy-spine-plugin](#renpy-spine-plugin)
   - [目录](#目录)
   - [1. 安装与目录结构](#1-安装与目录结构)
     - [1.1 安卓平台：so 放置与使用](#11-安卓平台so-放置与使用)
@@ -54,11 +54,11 @@
 
 ## 1. 安装与目录结构
 
-把整个 `spine-renpy` 文件夹复制到目标项目的 `game/` 文件夹下即可。
+把整个 `renpy-spine-plugin` 文件夹复制到目标项目的 `game/` 文件夹下即可。
 
 ```
 project/game/
-          └── spine-renpy/
+          └── renpy-spine-plugin/
               ├── spine_init.rpy          # 自动导入（init python early，无需手动配置 sys.path）
               ├── spine_core/             # ctypes 中间层（版本检测、DLL 派发、模型封装）
               │   ├── __init__.py         # 包入口：汇总导出 get_lib/load_model/SpineModel 等
@@ -95,9 +95,9 @@ project/game/
                       └── libc++_shared.so
 ```
 
-> 安卓版动态库（`.so`）随 `so/<abi>/` 一起放进 game 目录、随 APK 打包（位于 assets），运行时自动解压到 app 私有目录再 `dlopen`，见 [1.1 安卓平台](#11-安卓平台so-放置与使用)。`game/spine-renpy/so/` 保持不动即可，无需额外处理。
+> 安卓版动态库（`.so`）随 `so/<abi>/` 一起放进 game 目录、随 APK 打包（位于 assets），运行时自动解压到 app 私有目录再 `dlopen`，见 [1.1 安卓平台](#11-安卓平台so-放置与使用)。`game/renpy-spine-plugin/so/` 保持不动即可，无需额外处理。
 
-[spine_init.rpy](spine_init.rpy) 会以 `init python early` 自动把 `game/spine-renpy` 加入 `sys.path` 并导入 `spine()` 工厂，保证在 `image` 语句注册时已可用。**不需要**在 script.rpy 里手动配置任何东西。
+[spine_init.rpy](spine_init.rpy) 会以 `init python early` 自动把 `game/renpy-spine-plugin` 加入 `sys.path` 并导入 `spine()` 工厂，保证在 `image` 语句注册时已可用。**不需要**在 script.rpy 里手动配置任何东西。
 
 ### 1.1 安卓平台：so 放置与使用
 
@@ -105,7 +105,7 @@ project/game/
 
 **方式 A（推荐）：随 game 目录打包，运行时自动解压加载**
 
-1. **部署（只需一步）**：把整个 `spine-renpy` 文件夹（含 `so/<abi>/`）复制到目标项目 `game/` 下即可。so 文件名 `spine{ver}.so`（不带 lib 前缀），随项目一起打包进 APK。
+1. **部署（只需一步）**：把整个 `renpy-spine-plugin` 文件夹（含 `so/<abi>/`）复制到目标项目 `game/` 下即可。so 文件名 `spine{ver}.so`（不带 lib 前缀），随项目一起打包进 APK。
 2. **运行（自动，无需配置）**：`spine_core.py` 的 `_find_dll` 运行时读取 `Build.SUPPORTED_ABIS[0]` 得到当前 ABI（x86_64 模拟器自动映射到 `arm64-v8a`），从虚拟 FS 读 so 字节，解压到 app 私有目录（`getFilesDir()`）后 `dlopen` 绝对路径加载；4.3 的依赖 `libc++_shared.so`（so 目录里已带）会一并解压并预加载。每个版本只解压一次。
 
 **方式 B（可选）：移进 APK native libs（不依赖自动解压）**
@@ -113,7 +113,7 @@ project/game/
 不想用方式 A 时，把 `so/<abi>/` 里的 so 复制到 Ren'Py SDK 的 `rapt/prototype/renpyandroid/src/main/jniLibs/<abi>/`（与 `librenpython.so` 同级），**文件名需加 `lib` 前缀**（`libspine{ver}.so`，libc++_shared.so 保持原名，裸名加载按 `libspine{ver}.so` 查找）：
    - arm64 真机/模拟器 → `jniLibs/arm64-v8a/`
    - 32 位设备 → `jniLibs/armeabi-v7a/`
-重新打包 Android 包，so 即进入 APK 的 `lib/<abi>/`，由系统 linker 解析。采用方式 A 时 `game/spine-renpy/so/` 无需任何额外处理；so 目录中找不到时自动退回此方式（裸名加载）。
+重新打包 Android 包，so 即进入 APK 的 `lib/<abi>/`，由系统 linker 解析。采用方式 A 时 `game/renpy-spine-plugin/so/` 无需任何额外处理；so 目录中找不到时自动退回此方式（裸名加载）。
 
 ## 2. 快速开始
 
@@ -273,7 +273,7 @@ label demo:
 
 未命中不调用回调；`set_hit_callback(None)` 取消。回调需可 pickle（存档/热重载用），请用顶层函数而非 lambda。命中检测走当前帧渲染数据，无需改 C 层、无需重编译。
 
-> 注意：只处理 `MOUSEBUTTONDOWN`（按下即响应，游戏惯例）；如需"释放才算点击"，把 [spine_displayable.py 的 event](file:///d:/Tools/renpy8.4.1/spine-renpy/spine_displayable.py) 里的事件类型改为 `pygame.MOUSEBUTTONUP` 即可。
+> 注意：只处理 `MOUSEBUTTONDOWN`（按下即响应，游戏惯例）；如需"释放才算点击"，把 [spine_displayable.py 的 event](file:///d:/Tools/renpy8.4.1/renpy-spine-plugin/spine_displayable.py) 里的事件类型改为 `pygame.MOUSEBUTTONUP` 即可。
 
 ### 3.4 调试模式 `debugger=True`
 
@@ -571,7 +571,7 @@ model = spine_core.load_model("old.skel", "old.atlas", scale=0.01, version="3.5"
 
 - `SUPPORTED_VERSIONS = ["3.5", "3.6", "3.7", "3.8", "4.0", "4.1", "4.2", "4.3"]`
 - `SpineLib` 负责加载 DLL 并绑定稳定的 `spR_*` ABI；版本间的结构体布局差异全部由 C 侧消化。
-- DLL 查找顺序：环境变量 `SPINE_DLL` → 包目录 → 包内 `lib/` → 上级 `spine-renpy/build/`。
+- DLL 查找顺序：环境变量 `SPINE_DLL` → 包目录 → 包内 `lib/` → 上级 `renpy-spine-plugin/build/`。
 
 ## 7. 常见问题
 
