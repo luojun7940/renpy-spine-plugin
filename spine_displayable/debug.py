@@ -45,8 +45,9 @@ class DebugMixin:
 
         Ren'Py 派发事件时已把屏幕坐标逆变换成当前 displayable 的本地
         坐标（x, y，含 Transform/ATL 处理）。
-        - 非调试模式：左键按下命中则调用 set_hit_callback 回调，并向
-          set_listener 派发点击事件（type_name == "click"，含命中坐标）。
+        - 非调试模式：左键按下命中则向 set_listener 派发点击事件
+          （type_name == "click"，含命中坐标与附件信息）；block_click=True
+          时消费事件（不推进剧情），False 时放行。
         - 调试模式（debugger=True）：左键按下命中模型则开始拖动（模型
           随鼠标移动，仅 offset 平移；被上层显示项消费的点击收不到事件，
           即"被遮挡不算"），拖动中滚轮直接缩放 zoom，松开时把最终
@@ -60,35 +61,47 @@ class DebugMixin:
         return self._event_hit(ev, x, y)
 
     def _event_hit(self, ev, x, y):
-        """非调试模式：左键按下做像素级命中；命中时调用 set_hit_callback
-        回调，并向 set_listener 派发点击事件（type_name=="click"）。
-        不拦截事件（返回 None 放行，点击不推进对话）。"""
+        """非调试模式：左键按下做像素级命中；命中时向 set_listener 派发
+        点击事件（type_name=="click"，含命中附件信息）。
+
+        是否消费点击（不推进剧情）由**回调返回值**决定（在 click 事件处
+        传递）：回调返回 True=消费（IgnoreEvent，剧情不推进）；False=明确
+        放行（剧情推进）；None（回调无 return）= 用 block_click 属性兜底
+        （默认 True=拦截）。未命中时无论何种情况都放行（点击空白推进剧情）。
+        """
         if ev.type != pygame.MOUSEBUTTONDOWN or ev.button != 1:
             return None
-        if self._hit_callback is None and self._listener_callback is None:
+        if self._listener_callback is None:
             return None
         info = self._hit_xy(x, y)
         if info is None:
             return None
-        if self._hit_callback is not None:
-            self._hit_callback(info)
-        if self._listener_callback is not None:
-            # 点击事件与 C 层动画事件共用 dict 结构，type=6 / "click"，
-            # 额外带命中坐标（x/y 本地像素，wx/wy 世界坐标）
-            self._listener_callback({
-                "type": spine_core.EVENT_CLICK,
-                "type_name": spine_core.EVENT_NAMES[spine_core.EVENT_CLICK],
-                "animation": None,
-                "name": None,
-                "time": 0.0,
-                "int": 0,
-                "float": 0.0,
-                "string": None,
-                "x": info["x"],
-                "y": info["y"],
-                "wx": info["wx"],
-                "wy": info["wy"],
-            })
+        # 点击事件与 C 层动画事件共用 dict 结构，type=6 / "click"，
+        # 额外带命中坐标（x/y 本地像素，wx/wy 世界坐标）与附件信息
+        # （slot_index/slot_name/attachment，原 set_hit_callback 的独有数据）
+        rv = self._listener_callback({
+            "type": spine_core.EVENT_CLICK,
+            "type_name": spine_core.EVENT_NAMES[spine_core.EVENT_CLICK],
+            "animation": None,
+            "name": None,
+            "time": 0.0,
+            "int": 0,
+            "float": 0.0,
+            "string": None,
+            "x": info["x"],
+            "y": info["y"],
+            "wx": info["wx"],
+            "wy": info["wy"],
+            "slot_index": info.get("slot_index"),
+            "slot_name": info.get("slot_name"),
+            "attachment": info.get("attachment"),
+        })
+        # 是否消费点击（不推进剧情）由回调返回值控制，在 click 事件处传递：
+        # 返回 True=拦截；False=明确放行；None（回调无 return）时用
+        # block_click 属性兜底（默认 True=拦截）。未命中时始终放行。
+        if rv is True or (rv is None and self.block_click):
+            # 消费事件：阻止继续向下层派发（对话框收不到），剧情不推进
+            raise renpy.display.core.IgnoreEvent()
         return None
 
     def _event_debugger(self, ev, x, y):

@@ -422,7 +422,9 @@ class RenderMixin:
         # 抓取，而 focus.take_focuses() 每帧重建焦点列表，不在列表中的 grab
         # 会被清除（焦点.py：if not grab_found: grab = None）；注册焦点盒保证
         # 拖动期间 grab 一直有效（对应官方 Drag 在 render 里的 add_focus）。
-        if self.debugger:
+        # 注册了 set_listener 的模型同样需要焦点盒：否则非调试模式收不到
+        # 鼠标事件，click 命中派发（_event_hit）永远不会触发。
+        if self.debugger or self._listener_callback is not None:
             rv.add_focus(self, None, 0, 0, rv_w, rv_h)
 
         # 调试描边（debug_bounds=True）：对比 Render 框（红）、参考包围盒

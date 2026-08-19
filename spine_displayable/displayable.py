@@ -25,7 +25,7 @@ from .debug import DebugMixin
 
 class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
 
-    def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, **kwargs):
+    def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, **kwargs):
         super(SpineDisplayable, self).__init__(**kwargs)
         json_path = _abs(json_path)
         atlas_path = _abs(atlas_path)
@@ -88,11 +88,14 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self._mesh_layout = None
         # 已释放标记：dispose() 置位后 render 返回空 Render，防止过渡期间误渲染崩溃
         self._disposed = False
-        # 鼠标点击命中回调（set_hit_callback 注册，event 命中后调用）；None=未注册
-        self._hit_callback = None
         # 统一事件监听（set_listener 注册）：动画事件（C 层）+ 点击事件
-        # （显示层命中派发，type_name=="click"）；None=未注册
+        # （显示层命中派发，type_name=="click"，含附件信息）；None=未注册。
+        # 注册后模型会注册焦点盒以接收鼠标事件（见 render）。
         self._listener_callback = None
+        # block_click：命中模型时是否消费点击（不推进剧情）。True（默认）=
+        # raise IgnoreEvent 阻止事件下发给对话框；False = return None 放行
+        # （点击命中模型同样推进剧情）。未命中时始终放行。
+        self.block_click = block_click
         # 调试模式（spine(debugger=True)）：左键按下命中模型（被遮挡的点击
         # 已被上层消费，收不到事件）后拖动模型整体移动（仅 offset 平移），
         # 拖动中滚轮直接缩放 zoom；松开时把最终 offset/zoom 复制到剪切板。
@@ -256,27 +259,23 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         - 动画事件：spine 动画中的 event/start/interrupt/end/complete/dispose
           （C 层转发，字段见 spine_core.SpineModel.set_listener）。
         - 点击事件：左键按下命中模型时由显示层派发，type_name == "click"，
-          额外含 {"x", "y"}（displayable 本地像素坐标）与
-          {"wx", "wy"}（spine 世界坐标），其余字段为空；未命中不派发。
+          含 {"x", "y"}（displayable 本地像素坐标）、{"wx", "wy"}（spine
+          世界坐标）与命中附件信息 {"slot_index", "slot_name", "attachment"}；
+          未命中不派发。
+        点击推进：命中模型后是否放行（推进剧情）由**回调返回值**控制（在
+        click 事件处传递）：返回 True=消费点击、剧情不推进；False=明确放行、
+        剧情推进；None（无 return）= 用 block_click 属性兜底（默认 True=
+        拦截）。未命中时始终放行。回调需可 pickle（存档/热重载用），请用
+        顶层函数而非 lambda。
         例：
             def on_evt(e):
                 if e["type_name"] == "click":
-                    renpy.notify("点击模型 @(%d, %d)" % (e["x"], e["y"]))
+                    renpy.notify("点击 %s @(%d, %d)" % (e["attachment"], e["x"], e["y"]))
+                    return True   # 点击模型不推进剧情（return False 则放行）
             d.set_listener(on_evt)
         """
         self._listener_callback = callback
         self.model.set_listener(callback)
-
-    def set_hit_callback(self, callback):
-        """注册鼠标点击命中回调（像素级命中检测）。
-
-        callback(result)：result 为 dict，含 {"x", "y"}（displayable 本地
-        坐标）、{"wx", "wy"}（spine 世界坐标）与命中附件信息
-        {"slot_index", "slot_name", "attachment"}；未命中不调用。
-        传 None 取消注册。回调需可 pickle（存档/热重载用），请用顶层
-        函数而非 lambda。
-        """
-        self._hit_callback = callback
 
     # -- 存档 / 热重载支持 ----------------------------------------------------
 
@@ -334,9 +333,10 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self.anchor = anchor
         self.auto_zoom = auto_zoom
         self.premultiplied = premultiplied
-        # 兜底：旧存档/热重载可能缺命中回调与调试模式属性
-        self._hit_callback = state.get("_hit_callback")
+        # 兜底：旧存档/热重载可能缺监听回调与 block_click/调试模式属性
         self._listener_callback = state.get("_listener_callback")
+        if "block_click" not in state:
+            self.block_click = True
         self.debugger = bool(state.get("debugger", state.get("Debugger", False)))
         self._dbg_offset = tuple(state.get("_dbg_offset", (0.0, 0.0)))
         # 调试描边兜底：新参数未进 _pickle_args，热重载/读档旧实例时从 state

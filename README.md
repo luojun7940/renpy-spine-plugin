@@ -250,19 +250,18 @@ show expression _hero as hero at center
 
 ```renpy
 init python:
-    def on_hit(info):
-        renpy.notify("点中 %s / %s" % (info["slot_name"], info["attachment"]))
-    def on_miss(info):
-        pass
+    def on_evt(e):
+        if e["type_name"] == "click":
+            renpy.notify("点中 %s / %s" % (e["slot_name"], e["attachment"]))
 
 label demo:
     $ d = spine_preload("images/hero/hero.skel", "images/hero/hero.atlas",
-                        skin="Lv1", animation="idle", zoom=25)
-    $ d.set_hit_callback(on_hit)
+                        skin="Lv1", animation="idle", zoom=25, block_click=True)
+    $ d.set_listener(on_evt)
     show expression d as hero at center
 ```
 
-回调 `callback(result)` 的 `result` 字段：
+点击事件经 `set_listener` 统一派发（与动画 event/start/complete 等共用一条通道），判 `type_name == "click"` 区分。事件 dict 的命中字段：
 
 | 字段 | 说明 |
 |------|------|
@@ -271,7 +270,16 @@ label demo:
 | `slot_index` / `slot_name` | 命中附件的插槽索引/名称 |
 | `attachment` | 命中附件名 |
 
-未命中不调用回调；`set_hit_callback(None)` 取消。回调需可 pickle（存档/热重载用），请用顶层函数而非 lambda。命中检测走当前帧渲染数据，无需改 C 层、无需重编译。
+未命中不派发；`set_listener(None)` 取消。注册了监听器后模型会注册焦点盒以接收鼠标事件（未注册监听器的纯展示模型不受影响）。
+
+**点击是否推进剧情**：优先由 click 回调的**返回值**决定（在 click 事件处传递）——
+- 回调返回 `True`：消费点击（`IgnoreEvent`），剧情**不**推进。
+- 回调返回 `False`：明确放行，剧情照常推进。
+- 回调无返回值（`None`）：用 `block_click` 兜底（`spine()` / `spine_preload()` 参数或改 `d.block_click`，默认 `True`=拦截）。
+
+未命中模型（包围盒留白/空白/外部）时无论返回值与 `block_click` 都放行，点击照常推进。
+
+回调需可 pickle（存档/热重载用），请用顶层函数而非 lambda。命中检测走当前帧渲染数据，无需改 C 层、无需重编译。
 
 > 注意：只处理 `MOUSEBUTTONDOWN`（按下即响应，游戏惯例）；如需"释放才算点击"，把 [spine_displayable.py 的 event](spine_displayable.py) 里的事件类型改为 `pygame.MOUSEBUTTONUP` 即可。
 
@@ -704,8 +712,7 @@ def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, 
 | `get_slot_setup_attachment_name(slot_index) -> str\|None` | setup 附件名 |
 | `set_time_scale(scale)` | 全局动画速率 |
 | `set_track_time_scale(track, scale) -> bool` | 单轨道速率，`0` 冻结，轨道无动画返回 `False` |
-| `set_listener(callback)` | 事件回调（dict 参数：动画事件 + 点击事件 `"click"`，字段见 4.8），`None` 取消；需可 pickle 的顶层函数 |
-| `set_hit_callback(callback)` | 鼠标点击命中回调（`result` 字段见 3.3），`None` 取消；需可 pickle 的顶层函数 |
+| `set_listener(callback)` | 事件回调（dict 参数：动画事件 + 点击事件 `"click"`，点击含 `slot_index/slot_name/attachment`，字段见 3.3），`None` 取消；需可 pickle 的顶层函数 |
 | `dispose()` | 释放 C 层模型内存（ctx/骨架/图集缓冲）与合成图纹理等显示项资源；幂等；释放后不可再渲染（render 返回空 Render） |
 
 ### 8.2 `spine_core` 层

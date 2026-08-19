@@ -22,7 +22,7 @@ def clear_all():
     return n
 
 
-def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None, animation=None, loop=True, default_mix=0.2, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, **kwargs):
+def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None, animation=None, loop=True, default_mix=0.2, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, **kwargs):
     """创建 SpineDisplayable；skin/animation 指定后创建即应用/播放。
 
     auto_zoom：自动缩放（只调 zoom，不影响布局）。默认 None = 禁用，
@@ -54,6 +54,11 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None
     红 = Render 框；蓝 = 参考包围盒（创建时锁定的全部动画采样并集）；
     绿 = 当前帧实际包围盒（实时）；白十字 = 骨骼原点。用于排查
     "内容出界被裁"（绿超出红）或"框大内容小"（红远大于绿）等布局问题。
+    block_click：click 回调**无返回值（None）**时，命中模型是否消费点击、
+    不推进剧情（默认 True）。回调返回 True=拦截（剧情不推进）、False=放行
+    （剧情推进）时优先级更高，无需此参数；未命中模型时（点击包围盒空白/
+    外部）始终放行。仅注册了 set_listener 后生效（未注册监听器时模型不
+    接收鼠标事件）。
 
     创建时会采样全部动画全程的并集作为固定视口基准（SpineViewer 式固定
     viewport）：缩放与 Render 尺寸创建后恒定，切换动画/皮肤位置不瞬移；
@@ -61,7 +66,7 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None
     脚底贴 Render 底部、头部贴顶部），模型完整可见。采样后动画重置回 0
     （从头播放）。
     """
-    d = SpineDisplayable(json_path, atlas_path, scale=scale, zoom=zoom, auto_zoom=auto_zoom, version=version, premultiplied=premultiplied, anchor=anchor, debugger=debugger, debug_bounds=debug_bounds, **kwargs)
+    d = SpineDisplayable(json_path, atlas_path, scale=scale, zoom=zoom, auto_zoom=auto_zoom, version=version, premultiplied=premultiplied, anchor=anchor, debugger=debugger, debug_bounds=debug_bounds, block_click=block_click, **kwargs)
     if skin is not None:
         d.set_skin(skin)
     if animation is not None:
