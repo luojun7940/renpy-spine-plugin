@@ -273,7 +273,7 @@ label demo:
 
 未命中不调用回调；`set_hit_callback(None)` 取消。回调需可 pickle（存档/热重载用），请用顶层函数而非 lambda。命中检测走当前帧渲染数据，无需改 C 层、无需重编译。
 
-> 注意：只处理 `MOUSEBUTTONDOWN`（按下即响应，游戏惯例）；如需"释放才算点击"，把 [spine_displayable.py 的 event](file:///d:/Tools/renpy8.4.1/renpy-spine-plugin/spine_displayable.py) 里的事件类型改为 `pygame.MOUSEBUTTONUP` 即可。
+> 注意：只处理 `MOUSEBUTTONDOWN`（按下即响应，游戏惯例）；如需"释放才算点击"，把 [spine_displayable.py 的 event](spine_displayable.py) 里的事件类型改为 `pygame.MOUSEBUTTONUP` 即可。
 
 ### 3.4 调试模式 `debugger=True`
 
