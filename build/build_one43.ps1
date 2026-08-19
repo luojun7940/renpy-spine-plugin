@@ -11,9 +11,9 @@ Import-Module "$VsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $VsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -no_logo" | Out-Null
 
 $root = "d:\Tools\renpy8.4.1"
-$rt = "$root\spine-renpy\spine-runtimes\spine-runtimes-4.3"
-$build = "$root\spine-renpy\build"
-$libDir = "$root\spine-renpy\lib"
+$rt = "$root\renpy-spine-plugin\spine-runtimes\spine-runtimes-4.3"
+$build = "$root\renpy-spine-plugin\build"
+$libDir = "$root\renpy-spine-plugin\lib"
 New-Item -ItemType Directory -Force -Path $libDir | Out-Null
 $objCpp = "$build\obj\4.3\cpp"
 $objC = "$build\obj\4.3\c"
@@ -51,3 +51,4 @@ Write-Host "=== link spine4.3.dll ($($objs.Count) objs) ==="
 & link /nologo /DLL "/OUT:$out" @objs
 if ($LASTEXITCODE -ne 0) { Write-Host "!!! link failed"; exit 1 }
 Write-Host ">>> done: $out"
+

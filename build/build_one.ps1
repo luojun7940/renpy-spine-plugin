@@ -9,9 +9,9 @@ Import-Module "$VsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $VsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -no_logo" | Out-Null
 
 $root = "d:\Tools\renpy8.4.1"
-$build = "$root\spine-renpy\build"
-$rtRoot = "$root\spine-renpy\spine-runtimes"
-$libDir = "$root\spine-renpy\lib"
+$build = "$root\renpy-spine-plugin\build"
+$rtRoot = "$root\renpy-spine-plugin\spine-runtimes"
+$libDir = "$root\renpy-spine-plugin\lib"
 New-Item -ItemType Directory -Force -Path $libDir | Out-Null
 $v = $Version
 $srcRoot = "$rtRoot\spine-runtimes-$v\spine-c\spine-c"
@@ -31,3 +31,4 @@ $verNum = $v -replace '\.', ''
 & cl /nologo /O2 /LD /FI "$build\export_config.h" /D "SPINE_RENPY_VER=$verNum" /I $incs /Fo"$objDir\\" @srcs /Fe:$out $defArgs
 if ($LASTEXITCODE -ne 0) { Write-Host "!!! 编译失败: $v"; exit 1 }
 Write-Host ">>> 完成: $out"
+

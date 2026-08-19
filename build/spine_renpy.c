@@ -357,10 +357,12 @@ static void _spR_clearStaleDeform(spRContext *ctx) {
         }
         if (att->type == SP_ATTACHMENT_MESH || att->type == SP_ATTACHMENT_LINKED_MESH) {
             spVertexAttachment *va = (spVertexAttachment *)att;
+            /* 加权 mesh 的 deform 长度 = verticesCount/3*2（>= worldVerticesLength），
+             * 非加权 mesh 恰好相等；只有不足时才是残留，清 0 防越界。 */
 #if SPINE_RENPY_VER >= 38
-            if (slot->deformCount != va->worldVerticesLength) slot->deformCount = 0;
+            if (slot->deformCount < va->worldVerticesLength) slot->deformCount = 0;
 #else
-            if (slot->attachmentVerticesCount != va->worldVerticesLength) slot->attachmentVerticesCount = 0;
+            if (slot->attachmentVerticesCount < va->worldVerticesLength) slot->attachmentVerticesCount = 0;
 #endif
         } else {
 #if SPINE_RENPY_VER >= 38

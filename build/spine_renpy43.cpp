@@ -298,7 +298,9 @@ static void _spR_clearStaleDeform(spRContext *ctx) {
             if (spine_rtti_is_exactly(spine_attachment_get_rtti(att), spine_mesh_attachment_rtti())) {
                 spine_vertex_attachment va = spine_attachment_cast_to_vertex_attachment(att);
                 deform = spine_slot_pose_get_deform(poses[p]);
-                if (spine_array_float_size(deform) != spine_vertex_attachment_get_world_vertices_length(va))
+                /* 加权 mesh 的 deform 长度 = vertices.size()/3*2（>= worldVerticesLength），
+                 * 非加权恰好相等；只有不足时才是残留，清 0 防越界。 */
+                if (spine_array_float_size(deform) < spine_vertex_attachment_get_world_vertices_length(va))
                     spine_array_float_clear(deform);
             } else {
                 spine_array_float_clear(spine_slot_pose_get_deform(poses[p]));

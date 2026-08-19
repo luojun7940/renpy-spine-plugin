@@ -26,9 +26,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = "d:\Tools\renpy8.4.1"
-$build = "$root\spine-renpy\build"
-$rtRoot = "$root\spine-renpy\spine-runtimes"
-$soRoot = "$root\spine-renpy\so"
+$build = "$root\renpy-spine-plugin\build"
+$rtRoot = "$root\renpy-spine-plugin\spine-runtimes"
+$soRoot = "$root\renpy-spine-plugin\so"
 $ndk = "D:\Tools\Unity\Hub\Editor\2022.3.62f1c1\Editor\Data\PlaybackEngines\AndroidPlayer\NDK"
 $bin = "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin"
 
@@ -126,3 +126,4 @@ foreach ($v in $versions) {
     Write-Host ">>> 完成: $out"
 }
 Write-Host "全部编译完成"
+
