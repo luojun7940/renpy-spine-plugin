@@ -6,6 +6,7 @@
 """
 
 import os
+import weakref
 from typing import List
 
 import renpy
@@ -15,7 +16,7 @@ from renpy.display.core import Displayable
 import spine_core
 
 from .outline import _abs
-from .render import RenderMixin
+from .render import RenderMixin, _ATLAS_CACHE
 from .debug import DebugMixin
 
 
@@ -23,12 +24,39 @@ from .debug import DebugMixin
 # SpineDisplayable
 # ---------------------------------------------------------------------------
 
+
+def _auto_release_resources(model):
+    """weakref.finalize 回调：displayable 被 GC 后释放其持有的共享资源。
+
+    只强引用 model（model 不反向引用 displayable，无循环引用，displayable
+    可被正常回收）。合成图缓存键在 _ensure_atlas 借用缓存时挂到 model 上
+    （model._atlas_cache_key），回调时读取最新值归还；model.dispose() 幂等
+    （_ctx 置 None 保护），显式 dispose 后 finalize 已被 detach，不会重复。
+    """
+    try:
+        cache_key = getattr(model, "_atlas_cache_key", None)
+        if cache_key:
+            entry = _ATLAS_CACHE.get(cache_key)
+            if entry:
+                entry[6] -= 1
+                if entry[6] <= 0:
+                    del _ATLAS_CACHE[cache_key]
+        model.dispose()
+    except Exception:
+        pass
+
 class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
 
-    def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, **kwargs):
+    def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, auto_release=False, **kwargs):
         super(SpineDisplayable, self).__init__(**kwargs)
         json_path = _abs(json_path)
         atlas_path = _abs(atlas_path)
+        # auto_release：弱引用托管模式。True 时不登记进 _live（否则强引用
+        # 阻止 GC），改由 weakref.finalize 在对象被回收时自动释放共享资源
+        # （切场景后对象失去引用 → CPython 立即回收 → 回调卸载），
+        # 详见 _register_auto_release。
+        self._auto_release = bool(auto_release)
+        self._finalize = None  # weakref.finalize 句柄（auto_release 模式）
         # 模型（中间层，含 DLL 版本派发）
         # version 显式指定时跳过文件头检测（json 与 3.5+ 的 skel 默认自动识别）
         self.model = spine_core.load_model(json_path, atlas_path, scale=scale, version=version)
@@ -76,6 +104,7 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         # mesh 渲染用的合成图纹理（首次渲染时惰性构建，见 _ensure_atlas）
         self._atlas_base = os.path.dirname(atlas_path)
         self._atlas_texture = None
+        self._atlas_cache_key = None  # 合成图共享缓存键（方案 A），dispose 时归还
         self._atlas_w = 0
         self._atlas_h = 0
         self._atlas_offsets = {}   # 页名 -> 合成图中水平偏移 x
@@ -105,6 +134,10 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         # 调试描边（debug_bounds=True）：render 上画 Render 框（红）/参考包围盒
         # （蓝）/当前帧包围盒（绿）/骨骼原点十字（白），用于排查布局问题
         self.debug_bounds = debug_bounds
+        # auto_release 模式：注册 GC 自动释放回调（对象被回收时归还共享资源）。
+        # 此时合成图缓存键尚未确定（惰性构建），回调读 model._atlas_cache_key
+        # 动态取值，见 _auto_release_resources。
+        self._register_auto_release()
 
     # -- 动画控制 ----------------------------------------------------------
 
@@ -291,8 +324,10 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         for k in ("model", "version", "_last_st", "_ref_bbox", "_ref_bbox_done",
                   "_atlas_base", "_atlas_texture", "_atlas_w", "_atlas_h",
                   "_atlas_offsets", "_atlas_page_size", "_atlas_meta",
-                  "_mesh", "_mesh_cap", "_mesh_layout"):
+                  "_mesh", "_mesh_cap", "_mesh_layout", "_finalize"):
             state.pop(k, None)
+        # _auto_release 标志随 state 保存（weakref.finalize 不可 pickle，已剥离，
+        # __setstate__ 重建后重新注册）
         # 已释放实例的 model 已 dispose（_ctx 置 None），不再查询动画。
         # _pickle_track：新 DLL 为 get_track_state 的完整状态 dict（速率/进度/
         # mix 时间/slot 差异/骨架色/轨道队列），旧 DLL 为 (当前动画名, 循环, 队列)。
@@ -320,6 +355,10 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         reload 后一次性动画（loop=False）与后续接续动画不会丢失或变形。
         """
         self.__dict__.update(state)
+        # auto_release 标志随存档恢复（旧存档缺省 False）；finalize 不可
+        # pickle（__getstate__ 已剥离），重建后重新注册
+        self._auto_release = bool(state.get("_auto_release", False))
+        self._finalize = None
         args = self._pickle_args
         if len(args) == 8:
             json_path, atlas_path, scale, zoom, auto_zoom, version, premultiplied, anchor = args
@@ -350,6 +389,7 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self._ref_bbox_done = False
         self._atlas_base = os.path.dirname(atlas_path)
         self._atlas_texture = None
+        self._atlas_cache_key = None  # 合成图共享缓存键（方案 A），dispose 时归还
         self._atlas_w = 0
         self._atlas_h = 0
         self._atlas_offsets = {}
@@ -392,24 +432,57 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
             if anim:
                 self.model.set_animation(anim, loop=True)
         # 热重载后模块重新加载，_live 是全新登记表；未释放实例需重新登记，
-        # 保证 clear_all() 仍能统一回收
-        if not self._disposed and self not in _live:
+        # 保证 clear_all() 仍能统一回收。auto_release 实例不登记（弱引用托管，
+        # 由 GC 回调释放资源，登记会强引用阻止回收）
+        if not self._disposed and not self._auto_release and self not in _live:
             _live.append(self)
+        # auto_release 模式：重建完成后重新注册 GC 自动释放回调
+        self._register_auto_release()
+
+    def _register_auto_release(self):
+        """auto_release 模式：注册 GC 自动释放回调（weakref.finalize）。
+
+        快照只强引用 self.model（model 不反向引用 displayable，无循环引用，
+        displayable 可被正常回收）；合成图缓存键不参与快照，回调时读
+        model._atlas_cache_key 动态取值。重复调用安全（已注册且存活则跳过）。
+        """
+        if not self._auto_release:
+            return
+        fin = getattr(self, "_finalize", None)
+        if fin is not None and fin.alive:
+            return
+        self._finalize = weakref.finalize(self, _auto_release_resources, self.model)
 
     def dispose(self):
         """释放 C 层模型资源（ctx/骨架/图集缓冲）与合成图纹理等显示项资源。
 
         幂等：重复调用安全。释放后该实例不可再渲染（render 返回空 Render）。
         同时从模块登记表（clear_all 用）移除。
+        auto_release 模式：显式 dispose 后 detach finalize 回调（对象仍存活
+        时 GC 不会触发，detach 避免资源已释放后回调重复执行）。
         注意：GPU 纹理由 Ren'Py 纹理缓存管理，置 None 后随
         renpy.free_memory() 回收，不需要也不能手动释放。
         """
         if self._disposed:
             return
         self._disposed = True
+        fin = getattr(self, "_finalize", None)
+        if fin is not None and fin.alive:
+            fin.detach()
+            self._finalize = None
         if self in _live:
             _live.remove(self)
         self.model.dispose()
+        # 归还合成图共享缓存引用（方案 A）：归零则移除缓存条目，
+        # 纹理对象随 renpy 纹理缓存回收
+        ck = getattr(self, "_atlas_cache_key", None)
+        if ck:
+            self._atlas_cache_key = None
+            entry = _ATLAS_CACHE.get(ck)
+            if entry:
+                entry[6] -= 1
+                if entry[6] <= 0:
+                    del _ATLAS_CACHE[ck]
         # 合成图纹理与 mesh 缓冲引用全部断开，便于 GC / renpy.free_memory() 回收
         self._atlas_texture = None
         self._atlas_meta = None

@@ -22,8 +22,14 @@ def clear_all():
     return n
 
 
-def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None, animation=None, loop=True, default_mix=0.2, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, **kwargs):
+def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None, animation=None, loop=True, default_mix=0.2, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, block_click=True, auto_release=False, **kwargs):
     """创建 SpineDisplayable；skin/animation 指定后创建即应用/播放。
+
+    auto_release：弱引用托管（默认 False）。True 时该实例不登记进 clear_all
+    登记表，改为在对象被 GC 回收时自动释放共享资源（模型 data 引用 + 合成图
+    缓存计数）：切换场景后实例失去场景引用 → CPython 引用计数归零 → 回调
+    立即触发卸载，无需手动 dispose/clear_all。注意：若代码里仍持有引用
+    （如存进全局变量）则不会卸载，属预期行为（还在使用中）。
 
     auto_zoom：自动缩放（只调 zoom，不影响布局）。默认 None = 禁用，
     此时缩放由 zoom 决定。格式 ("模式", x分辨率, y分辨率)，模式为
@@ -66,7 +72,7 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None
     脚底贴 Render 底部、头部贴顶部），模型完整可见。采样后动画重置回 0
     （从头播放）。
     """
-    d = SpineDisplayable(json_path, atlas_path, scale=scale, zoom=zoom, auto_zoom=auto_zoom, version=version, premultiplied=premultiplied, anchor=anchor, debugger=debugger, debug_bounds=debug_bounds, block_click=block_click, **kwargs)
+    d = SpineDisplayable(json_path, atlas_path, scale=scale, zoom=zoom, auto_zoom=auto_zoom, version=version, premultiplied=premultiplied, anchor=anchor, debugger=debugger, debug_bounds=debug_bounds, block_click=block_click, auto_release=auto_release, **kwargs)
     if skin is not None:
         d.set_skin(skin)
     if animation is not None:
@@ -84,7 +90,8 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, skin=None
         d._ensure_shader()
     except Exception:
         pass
-    _live.append(d)  # 登记，供 clear_all() 批量释放
+    if not auto_release:
+        _live.append(d)  # 登记，供 clear_all() 批量释放；auto_release 实例不入登记表（弱引用托管，避免强引用阻止 GC）
     return d
 
 

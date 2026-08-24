@@ -23,13 +23,28 @@ from .hit import HitMixin
 class SpineModel(TrackStateMixin, HitMixin):
     """一个 spine 模型实例（对应 C 侧的一个 spRContext）。"""
 
-    def __init__(self, lib: SpineLib, json_path: str, atlas_path: str, scale: float = 0.01):
+    def __init__(self, lib: SpineLib, json_path: str, atlas_path: str, scale: float = 0.01,
+                 data: int = None, release_data_cb=None):
+        """创建模型实例。
+
+        data 不为 None 时走共享数据层：data 是 spR_loadData(/*Mem*/) 解析好的
+        atlas + skeletonData 句柄，通过 spR_createSkeleton 派生本实例的 ctx
+        （ctx 的 ownsData=0，dispose 时不会连带释放共享资源）；实例 dispose 后
+        由 release_data_cb 归还引用计数（归零则卸载 data）。
+        data 为 None 时退回旧路径：本实例自持 atlas/skeletonData（ownsData=1）。
+        """
         self._lib = lib
         self.atlas_dir = os.path.dirname(os.path.abspath(atlas_path))
         self.json_path = json_path
         self.atlas_path = atlas_path
+        self._release_data_cb = release_data_cb
 
-        if hasattr(lib._lib, "spR_createMem"):
+        if data:
+            # 共享数据层：data 已解析好，仅派生骨架/状态运行时
+            ctx = lib._lib.spR_createSkeleton(data)
+            if not ctx:
+                raise RuntimeError("spR_createSkeleton 失败")
+        elif hasattr(lib._lib, "spR_createMem"):
             # 内存版：安卓虚拟文件系统（APK assets）无法 fopen，Python 读好字节传入
             skel_data = _read_bytes(json_path)
             atlas_data = _read_bytes(atlas_path)
@@ -523,5 +538,9 @@ class SpineModel(TrackStateMixin, HitMixin):
 
     def dispose(self):
         if getattr(self, "_ctx", None):
-            self._lib._lib.spR_dispose(self._ctx)
+            self._lib._lib.spR_dispose(self._ctx)  # ownsData=0 时不释放共享 data
             self._ctx = None
+        cb = getattr(self, "_release_data_cb", None)
+        if cb:
+            self._release_data_cb = None
+            cb()  # 归还共享 data 引用计数（归零则卸载）

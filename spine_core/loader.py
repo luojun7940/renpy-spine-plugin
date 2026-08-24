@@ -48,6 +48,20 @@ class SpineLib:
             lib.spR_createMem.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
             lib.spR_createMem.restype = ctypes.c_void_p
 
+        # 共享数据层（方案 B）：atlas+skeletonData 解析一次，多个运行时共享。
+        # 新 DLL 才导出，旧 DLL 未导出时跳过绑定，SpineModel 走 spR_create 旧路径。
+        if hasattr(lib, "spR_loadData"):
+            lib.spR_loadData.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_float]
+            lib.spR_loadData.restype = ctypes.c_void_p
+            lib.spR_loadDataMem.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_float]
+            lib.spR_loadDataMem.restype = ctypes.c_void_p
+            lib.spR_dataError.argtypes = [ctypes.c_void_p]
+            lib.spR_dataError.restype = ctypes.c_char_p
+            lib.spR_createSkeleton.argtypes = [ctypes.c_void_p]
+            lib.spR_createSkeleton.restype = ctypes.c_void_p
+            lib.spR_disposeData.argtypes = [ctypes.c_void_p]
+            lib.spR_disposeData.restype = None
+
         lib.spR_error.argtypes = [ctypes.c_void_p]
         lib.spR_error.restype = ctypes.c_char_p
 

@@ -16,6 +16,7 @@
     - [2.2 预加载 `spine_preload()`](#22-预加载-spine_preload)
     - [2.3 常用控制组合](#23-常用控制组合)
     - [2.4 资源释放](#24-资源释放)
+    - [2.5 缓存与弱引用（自动释放）](#25-缓存与弱引用自动释放)
   - [3. `spine()` 工厂函数](#3-spine-工厂函数)
     - [3.1 固定视口（锚点）说明](#31-固定视口锚点说明)
     - [3.2 预加载 `spine_preload()`](#32-预加载-spine_preload)
@@ -187,12 +188,55 @@ label battle_end:
 
 > `dispose()` 后该实例不可再渲染（render 返回空 Render），如需继续使用请重新 `spine()` 创建。
 
+### 2.5 缓存与弱引用（自动释放）
+
+插件在进程内维护**两层共享缓存**，同一资源的解析/上传只做一次、多实例引用计数共享，`dispose()`（或 GC）归还、归零即卸载：
+
+**共享数据缓存（`_DATA_CACHE`，方案 B）**
+- key = `(dll路径, skel/json绝对路径, atlas绝对路径, scale)`
+- 同一 `(json, atlas, scale)` 的骨架 + 图集只在 C 层**解析一次**，后续实例通过 `spR_createSkeleton` 从共享 data 派生运行时（每个实例仍是独立骨架/动画状态）
+- `spine()` 创建时借出（引用 +1），`dispose()` / GC 归还（引用 -1），**归零才卸载 C 层 data**
+- 好处：多实例同屏时解析成本只付一次；旧 DLL（无 `spR_loadData` 导出）自动退回自持路径，行为不变
+
+**合成图纹理缓存（`_ATLAS_CACHE`，方案 A）**
+- key = `(atlas绝对路径, premultiplied)`
+- 多页图集的 PNG 解码 + 水平拼接 + GPU 上传（大图集可达 4096×2048）只做**一次**，多实例共享同一张合成纹理与图集元数据
+- `_ensure_atlas` 借出（引用 +1），`dispose()` / GC 归还（引用 -1），归零移除缓存条目，纹理对象随 Ren'Py 纹理缓存回收
+
+**弱引用自动释放（`auto_release=True`）**
+
+默认 `False`（手动管理）。开启后该实例**不登记进 `clear_all` 登记表**（否则强引用阻止回收），改用 `weakref.finalize` 托管：实例被 GC 回收时自动归还共享 data 引用与合成图缓存计数，**无需手动 `dispose()`**：
+
+```renpy
+# 切场景自动卸载：对象失去引用 → 立即回收 → 资源自动归还
+show expression spine("images/hero/hero.skel", "images/hero/hero.atlas",
+                      animation="idle", auto_release=True) as hero at center
+```
+
+触发时机与边界：
+
+| 场景 | 行为 |
+|------|------|
+| `hide` / 转场景后实例失去场景引用 | CPython 引用计数归零 → **立即**回收 → 回调自动释放资源 |
+| 代码仍持有引用（如存进全局变量） | **不卸载**（还在使用中，属预期行为） |
+| 显式 `d.dispose()` | 正常释放并 detach 回调，不会重复释放 |
+| 存档 / 热重载（Shift+R） | `auto_release` 标志随存档保存，读档重建后自动重新注册回调 |
+
+三种释放方式的取舍：
+
+| 方式 | 适用场景 |
+|------|----------|
+| `d.dispose()` | 单实例精确释放，用完即弃 |
+| `clear_all()` | 批量释放**全部手动管理**实例（场景切换时统一清理） |
+| `auto_release=True` | 实例只存在于当前场景、随场景消失自动卸载，无需记引用、不手动清理 |
+
 ## 3. `spine()` 工厂函数
 
 ```python
 def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None,
           skin=None, animation=None, loop=True, default_mix=0.2, version=None,
-          premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, **kwargs):
+          premultiplied=False, anchor="origin", debugger=False, debug_bounds=False,
+          auto_release=False, **kwargs):
     """创建 SpineDisplayable；skin/animation 指定后创建即应用/播放。"""
 ```
 
@@ -212,6 +256,7 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None,
 | `anchor` | `"origin"` | 居中定位锚点。`"origin"`（默认）= 骨骼坐标原点 `(0,0)` 对齐 Render/画布中心（对齐 spine-unity 的 GameObject transform 原点）；`"center"` = 包围盒几何中心对齐中心（旧行为）；`"origin_tight"` = Render 紧密（无留白）且原点仍居中：布局层固定像素偏移把原点补偿回 Render 中心（align 0.5 时原点仍在屏幕中心，同 origin；同时 y 方向 `yalign 0/1` 精确贴顶/贴底，不被 origin 的对称留白顶起，见 3.1）。仅影响居中时位置，不改变大小/缩放 |
 | `debugger` | `False` | 调试模式：左键按下命中模型后拖动（仅屏幕 offset 平移，不动 align、Render 尺寸恒定，可拖出任意位置），**拖动中**滚轮直接缩放 `zoom`（0.01 下限），左键松开时把最终 `offset/zoom` 复制到系统剪切板（见 3.4）。拖动/缩放会消费事件（不推进剧情），松开后滚轮恢复正常透传（前进/回退不占用） |
 | `debug_bounds` | `False` | 调试描边：在模型上叠加 1px 线框可视化（红=Render 框、蓝=参考包围盒、绿=当前帧实际包围盒、白十字=骨骼原点），用于排查"内容出界被裁"（绿超出红）或"框大内容小"（红远大于绿）等布局问题。仅叠加绘制，**不改变**渲染内容/尺寸/命中；配合 `debugger` 组合使用（见 3.5） |
+| `auto_release` | `False` | 弱引用托管（见 [2.5](#25-缓存与弱引用自动释放)）：`True` 时该实例不登记进 `clear_all` 登记表，改为对象被 GC 回收时自动释放共享资源（模型 data 引用 + 合成图缓存计数），无需手动 `dispose()`。切场景后实例失去引用 → 立即回收 → 自动卸载；代码仍持有引用（如全局变量）则不卸载，属预期行为 |
 
 返回 `SpineDisplayable` 实例（继承自 `renpy.display.core.Displayable`），可直接用于 `show expression`、`Transform`、`ATL` 等。
 
@@ -490,11 +535,11 @@ label start:
 
 | 操作 | 效果 |
 |------|------|
-| `hide hero` | 仅从场景移除形象，**不释放**任何资源 |
+| `hide hero` | 仅从场景移除形象，**不释放**任何资源（`auto_release=True` 创建的实例除外：失去场景引用后由 GC 自动释放，见 2.5） |
 | `d.clear_track()` | 仅清动画轨道，**不释放**资源 |
 | `renpy.free_memory()` | 只清 Ren'Py 自身缓存，**不释放** C 层模型内存 |
 | `d.dispose()` | 释放该实例的 C 层模型内存（ctx/骨架/图集缓冲）与合成图纹理等显示项资源；幂等，可重复调用 |
-| `clear_all()` | 释放**所有已创建且未释放**的实例（内部逐个 `dispose()`），返回释放数量；常用于场景结束统一清理 |
+| `clear_all()` | 释放**所有已创建且未释放**的实例（内部逐个 `dispose()`），返回释放数量；常用于场景结束统一清理。**不包含** `auto_release=True` 的实例（由 GC 托管） |
 
 ```renpy
 # 单个释放
@@ -626,7 +671,7 @@ model = spine_core.load_model("old.skel", "old.atlas", scale=0.01, version="3.5"
 def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None,
           skin=None, animation=None, loop=True, default_mix=0.2,
           version=None, premultiplied=False, anchor="origin",
-          debugger=False, debug_bounds=False, **kwargs) -> SpineDisplayable:
+          debugger=False, debug_bounds=False, auto_release=False, **kwargs) -> SpineDisplayable:
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -645,6 +690,7 @@ def spine(json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None,
 | `anchor` | `"origin"` | 居中定位锚点：`"origin"`= 骨骼坐标原点 `(0,0)` 居 Render 中心（对齐 spine-unity transform 原点）；`"center"`= 包围盒最小角贴左下（旧行为）；`"origin_tight"`= Render 紧密且原点仍居中（布局补偿偏移，见 3.1） |
 | `debugger` | `False` | 调试模式：左键命中模型后拖动（仅 offset 屏幕平移、不动 align）、**拖动中**滚轮缩放 `zoom`（0.01 下限）、左键松开时把最终 offset/zoom 复制到系统剪切板（见 3.4）；拖动/缩放会消费事件（不推进剧情），松开后滚轮恢复正常透传 |
 | `debug_bounds` | `False` | 调试描边：叠加 1px 线框（红=Render 框、蓝=参考包围盒、绿=当前帧实际包围盒、白十字=骨骼原点），用于排查出界被裁/留白过大等布局问题；仅叠加绘制，不改变渲染与命中（见 3.5） |
+| `auto_release` | `False` | 弱引用托管（见 2.5）：`True` 时实例不登记进 `clear_all` 表，改为对象被 GC 回收时自动释放共享资源（模型 data 引用 + 合成图缓存计数）；切场景后失去引用 → 立即回收 → 自动卸载，代码仍持有引用则不卸载 |
 | `**kwargs` | — | 透传给 `Displayable.__init__` |
 
 创建时会采样全部动画全程并集作为固定视口基准（缩放/Render 尺寸创建后恒定，切换动画/皮肤不瞬移），并预热图集上传与 shader，把首帧卡顿移到创建阶段。锚点由 `anchor` 决定（默认 `"origin"`= 骨骼原点居中，见 3.1）。
@@ -659,12 +705,12 @@ def spine_preload(json_path, atlas_path, **kwargs) -> SpineDisplayable:
 def clear_all() -> int:
 ```
 
-释放**所有已创建且未释放**的 `SpineDisplayable`（内部逐个 `dispose()`），返回释放数量；常用于场景结束统一清理。释放后的实例不可再渲染，如需使用请重新 `spine()` 创建。
+释放**所有已创建且未释放**的 `SpineDisplayable`（内部逐个 `dispose()`），返回释放数量；常用于场景结束统一清理。**不包含** `auto_release=True` 创建的实例（弱引用托管，由 GC 自动释放，见 2.5）。释放后的实例不可再渲染，如需使用请重新 `spine()` 创建。
 
 #### 8.1.2 `class SpineDisplayable(Displayable)`
 
 ```python
-def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, **kwargs)
+def __init__(self, json_path, atlas_path, scale=0.01, zoom=1.0, auto_zoom=None, version=None, premultiplied=False, anchor="origin", debugger=False, debug_bounds=False, auto_release=False, **kwargs)
 ```
 
 关键属性：

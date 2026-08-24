@@ -21,6 +21,13 @@ import spine_core
 from .outline import _draw_rect_outline
 
 
+# 方案 A：合成图纹理共享缓存。key = (atlas 绝对路径, premultiplied)，
+# value = [texture, atlas_w, atlas_h, offsets, page_size, meta, refcount]。
+# 同一图集的合成纹理只构建一次，多实例引用计数共享（_ensure_atlas 借出、
+# displayable.dispose 归还，归零移除缓存；GPU 纹理本身仍由 Ren'Py 纹理缓存管理）。
+_ATLAS_CACHE: dict = {}
+
+
 class RenderMixin:
     """SpineDisplayable 的渲染 / 布局 / 参考包围盒方法。"""
 
@@ -155,9 +162,27 @@ class RenderMixin:
         Ren'Py 运行时无 PIL，用自带 pygame 加载、renpy Surface 合成。
         非预乘图集由 load_texture 上传时自动预乘；预乘图集
         （premultiplied=True）走 load_gltexture_premultiplied 直通上传。
+
+        方案 A 共享缓存：同一 (atlas 路径, premultiplied) 的合成图只构建
+        解码/合成/上传一次，后续实例命中 _ATLAS_CACHE 复用（引用 +1，
+        dispose 时归还，归零移除缓存）。
         """
         if self._atlas_texture is not None:
             return
+
+        # 共享缓存：命中则复用合成图与其元数据（引用 +1）
+        cache_key = (os.path.abspath(self.model.atlas_path), self.premultiplied)
+        entry = _ATLAS_CACHE.get(cache_key)
+        if entry is not None:
+            entry[6] += 1
+            self._atlas_cache_key = cache_key
+            self.model._atlas_cache_key = cache_key  # auto_release 回调动态取值用
+            self._atlas_texture, self._atlas_w, self._atlas_h = entry[0], entry[1], entry[2]
+            self._atlas_offsets = dict(entry[3])
+            self._atlas_page_size = dict(entry[4])
+            self._atlas_meta = entry[5]
+            return
+
         import pygame
         from renpy.display import pgrender
 
@@ -201,6 +226,15 @@ class RenderMixin:
             pw[idx] = w
             ph[idx] = h
         self._atlas_meta = (offs, pw, ph)
+
+        # 入缓存（引用计数 1）：offsets/page_size 存副本，防外部改写污染缓存
+        self._atlas_cache_key = cache_key
+        self.model._atlas_cache_key = cache_key  # auto_release 回调动态取值用
+        _ATLAS_CACHE[cache_key] = [
+            self._atlas_texture, self._atlas_w, self._atlas_h,
+            dict(self._atlas_offsets), dict(self._atlas_page_size),
+            self._atlas_meta, 1,
+        ]
 
     def _build_mesh(self, min_x, min_y, zoom):
         """把所有附件合并进一个 Mesh2（共享合成图纹理），单次 draw call。

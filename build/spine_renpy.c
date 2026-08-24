@@ -81,7 +81,19 @@ typedef struct spRContext {
     /* 裁剪器（spSkeletonClipping）：3.5~4.2 各版本结构体与 API 完全一致，
      * 渲染循环中 clipStart / clipTriangles / clipEnd 驱动裁剪附件。 */
     spSkeletonClipping *clipper;
+    /* 是否独占 atlas/skeletonData：spR_create 旧路径置 1（dispose 时连带释放），
+     * spR_createSkeleton 共享路径置 0（data 归共享层 spR_disposeData 管理）。 */
+    int ownsData;
 } spRContext;
+
+/* 共享数据层句柄：atlas + skeletonData 只解析一次，由多个运行时 spRContext
+ * 共享（spR_createSkeleton）。生命周期由 Python 侧引用计数管理：
+ * spR_loadData / spR_loadDataMem 创建，spR_disposeData 释放。 */
+typedef struct spRData {
+    spAtlas *atlas;
+    spSkeletonData *skeletonData;
+    char error[512];
+} spRData;
 
 /* spRDrawItem 的 mesh 数据写入本帧公共缓冲（动态扩容），结构体内只记偏移；
  * 256 顶点上限时代的固定数组已移除，超大 mesh 附件不再截断。
@@ -155,144 +167,232 @@ static int is_skeleton_json_data(const unsigned char *data, int len) {
     return 0;
 }
 
-SP_R_API void *spR_create(const char *jsonPath, const char *atlasPath, float scale) {
-    spRContext *ctx = calloc(1, sizeof(spRContext));
+/* ---------------- 共享数据层：atlas + skeletonData 解析 ---------------- */
+
+/* 解析 atlas + skeletonData（文件版）。成功返回 1，失败写 data->error 返回 0。
+ * 页索引写入 page->rendererObject 供 texIndex 使用。 */
+static int _spR_parseDataFile(spRData *data, const char *jsonPath, const char *atlasPath, float scale) {
     int idx;
     spAtlasPage *page;
 
-    if (!ctx) return NULL;
-
-    /* world Y points down, matches Ren'Py screen coordinates */
-    spBone_setYDown(1);
-
-    ctx->atlas = spAtlas_createFromFile(atlasPath, NULL);
-    if (!ctx->atlas) {
-        snprintf(ctx->error, sizeof(ctx->error), "cannot load atlas: %s", atlasPath);
-        return ctx;
+    data->atlas = spAtlas_createFromFile(atlasPath, NULL);
+    if (!data->atlas) {
+        snprintf(data->error, sizeof(data->error), "cannot load atlas: %s", atlasPath);
+        return 0;
     }
 
     /* store page index in rendererObject for texIndex */
     idx = 0;
-    for (page = ctx->atlas->pages; page; page = page->next)
+    for (page = data->atlas->pages; page; page = page->next)
         page->rendererObject = (void *)(intptr_t)(idx++);
 
     /* spSkeletonJson_create(atlas) internally builds the atlas attachment loader */
     if (is_skeleton_json_file(jsonPath)) {
-        spSkeletonJson *json = spSkeletonJson_create(ctx->atlas);
+        spSkeletonJson *json = spSkeletonJson_create(data->atlas);
         json->scale = scale;
 
-        ctx->skeletonData = spSkeletonJson_readSkeletonDataFile(json, jsonPath);
-        if (!ctx->skeletonData) {
+        data->skeletonData = spSkeletonJson_readSkeletonDataFile(json, jsonPath);
+        if (!data->skeletonData) {
             if (json->error)
-                snprintf(ctx->error, sizeof(ctx->error), "%s", json->error);
+                snprintf(data->error, sizeof(data->error), "%s", json->error);
             else
-                snprintf(ctx->error, sizeof(ctx->error), "cannot read skeleton json: %s", jsonPath);
+                snprintf(data->error, sizeof(data->error), "cannot read skeleton json: %s", jsonPath);
             spSkeletonJson_dispose(json);
-            return ctx;
+            return 0;
         }
         spSkeletonJson_dispose(json);
     } else {
         /* skel 二进制：spSkeletonBinary 内部处理 hash/版本等文件头（3.7+） */
-        spSkeletonBinary *binary = spSkeletonBinary_create(ctx->atlas);
+        spSkeletonBinary *binary = spSkeletonBinary_create(data->atlas);
         binary->scale = scale;
 
-        ctx->skeletonData = spSkeletonBinary_readSkeletonDataFile(binary, jsonPath);
-        if (!ctx->skeletonData) {
+        data->skeletonData = spSkeletonBinary_readSkeletonDataFile(binary, jsonPath);
+        if (!data->skeletonData) {
             if (binary->error)
-                snprintf(ctx->error, sizeof(ctx->error), "%s", binary->error);
+                snprintf(data->error, sizeof(data->error), "%s", binary->error);
             else
-                snprintf(ctx->error, sizeof(ctx->error), "cannot read skeleton skel: %s", jsonPath);
+                snprintf(data->error, sizeof(data->error), "cannot read skeleton skel: %s", jsonPath);
             spSkeletonBinary_dispose(binary);
-            return ctx;
+            return 0;
         }
         spSkeletonBinary_dispose(binary);
     }
+    return 1;
+}
 
+/* 解析 atlas + skeletonData（内存版）。与 _spR_parseDataFile 同规则，
+ * atlas 的 dir 传空串：page 的图片路径不需要在此拼目录（渲染层自行
+ * 按 atlas 同目录 + 页名查找图片）。
+ * 注意：atlasData/jsonData 必须保证在调用期间有效（解析完成后不再引用）。 */
+static int _spR_parseDataMem(spRData *data, const unsigned char *skeletonData, int skeletonLen,
+                             const unsigned char *atlasData, int atlasLen, float scale) {
+    int idx;
+    spAtlasPage *page;
+
+    data->atlas = spAtlas_create((const char *)atlasData, atlasLen, "", NULL);
+    if (!data->atlas) {
+        snprintf(data->error, sizeof(data->error), "cannot load atlas from memory");
+        return 0;
+    }
+
+    /* store page index in rendererObject for texIndex */
+    idx = 0;
+    for (page = data->atlas->pages; page; page = page->next)
+        page->rendererObject = (void *)(intptr_t)(idx++);
+
+    if (is_skeleton_json_data(skeletonData, skeletonLen)) {
+        spSkeletonJson *json = spSkeletonJson_create(data->atlas);
+        json->scale = scale;
+
+        data->skeletonData = spSkeletonJson_readSkeletonData(json, (const char *)skeletonData);
+        if (!data->skeletonData) {
+            if (json->error)
+                snprintf(data->error, sizeof(data->error), "%s", json->error);
+            else
+                snprintf(data->error, sizeof(data->error), "cannot read skeleton json from memory");
+            spSkeletonJson_dispose(json);
+            return 0;
+        }
+        spSkeletonJson_dispose(json);
+    } else {
+        /* skel 二进制：spSkeletonBinary 内部处理 hash/版本等文件头（3.7+） */
+        spSkeletonBinary *binary = spSkeletonBinary_create(data->atlas);
+        binary->scale = scale;
+
+        data->skeletonData = spSkeletonBinary_readSkeletonData(binary, skeletonData, skeletonLen);
+        if (!data->skeletonData) {
+            if (binary->error)
+                snprintf(data->error, sizeof(data->error), "%s", binary->error);
+            else
+                snprintf(data->error, sizeof(data->error), "cannot read skeleton skel from memory");
+            spSkeletonBinary_dispose(binary);
+            return 0;
+        }
+        spSkeletonBinary_dispose(binary);
+    }
+    return 1;
+}
+
+/* 运行时初始化：基于已解析的 skeletonData 创建 state/skeleton/裁剪器。
+ * 事件转发 listener 挂接：所有版本 spAnimationState 均有 listener / rendererObject
+ * 字段（3.5 无 userData，故用 rendererObject 反查 context）。 */
+static void _spR_createRuntime(spRContext *ctx) {
     ctx->stateData = spAnimationStateData_create(ctx->skeletonData);
     ctx->state = spAnimationState_create(ctx->stateData);
     ctx->skeleton = spSkeleton_create(ctx->skeletonData);
     spSkeleton_setToSetupPose(ctx->skeleton);
     SP_R_UPDATE_WORLD(ctx->skeleton);
 
-    /* 挂上事件转发 listener：所有版本 spAnimationState 均有 listener / rendererObject
-     * 字段（3.5 无 userData，故用 rendererObject 反查 context）。 */
     ctx->state->listener = _spR_forwardListener;
     ctx->state->rendererObject = ctx;
     /* 裁剪器：渲染循环（collectDrawItems/buildMesh）复用一个实例 */
     ctx->clipper = spSkeletonClipping_create();
+}
+
+SP_R_API void *spR_create(const char *jsonPath, const char *atlasPath, float scale) {
+    spRContext *ctx = calloc(1, sizeof(spRContext));
+    spRData data;
+
+    if (!ctx) return NULL;
+
+    /* world Y points down, matches Ren'Py screen coordinates */
+    spBone_setYDown(1);
+
+    /* 旧路径：解析失败返回带 error 的 ctx（与历史行为一致）。
+     * 失败时 data 里可能已加载 atlas（skeletonData 失败），需手动释放。 */
+    memset(&data, 0, sizeof(data));
+    if (!_spR_parseDataFile(&data, jsonPath, atlasPath, scale)) {
+        snprintf(ctx->error, sizeof(ctx->error), "%s", data.error);
+        if (data.skeletonData) spSkeletonData_dispose(data.skeletonData);
+        if (data.atlas) spAtlas_dispose(data.atlas);
+        return ctx;
+    }
+    ctx->ownsData = 1;
+    ctx->atlas = data.atlas;
+    ctx->skeletonData = data.skeletonData;
+    _spR_createRuntime(ctx);
     return ctx;
 }
 
 /* 内存版 spR_create：json/skel 与 atlas 全部由调用方读好字节直接传入，
  * C 层不再访问文件系统（安卓 asset 虚拟文件系统无法 fopen，需 renpy 读取）。
- * atlas 的 dir 传空串：page 的图片路径不需要在此拼目录（渲染层自行
- * 按 atlas 同目录 + 页名查找图片），与原 spAtlas_createFromFile 行为等价。
  * 注意：atlasData/jsonData 必须保证在调用期间有效（解析完成后不再引用）。 */
 SP_R_API void *spR_createMem(const unsigned char *skeletonData, int skeletonLen,
                              const unsigned char *atlasData, int atlasLen, float scale) {
     spRContext *ctx = calloc(1, sizeof(spRContext));
-    int idx;
-    spAtlasPage *page;
+    spRData data;
 
     if (!ctx) return NULL;
 
     /* world Y points down, matches Ren'Py screen coordinates */
     spBone_setYDown(1);
 
-    ctx->atlas = spAtlas_create((const char *)atlasData, atlasLen, "", NULL);
-    if (!ctx->atlas) {
-        snprintf(ctx->error, sizeof(ctx->error), "cannot load atlas from memory");
+    /* 旧路径：解析失败返回带 error 的 ctx（与历史行为一致）。
+     * 失败时 data 里可能已加载 atlas（skeletonData 失败），需手动释放。 */
+    memset(&data, 0, sizeof(data));
+    if (!_spR_parseDataMem(&data, skeletonData, skeletonLen, atlasData, atlasLen, scale)) {
+        snprintf(ctx->error, sizeof(ctx->error), "%s", data.error);
+        if (data.skeletonData) spSkeletonData_dispose(data.skeletonData);
+        if (data.atlas) spAtlas_dispose(data.atlas);
         return ctx;
     }
-
-    /* store page index in rendererObject for texIndex */
-    idx = 0;
-    for (page = ctx->atlas->pages; page; page = page->next)
-        page->rendererObject = (void *)(intptr_t)(idx++);
-
-    if (is_skeleton_json_data(skeletonData, skeletonLen)) {
-        spSkeletonJson *json = spSkeletonJson_create(ctx->atlas);
-        json->scale = scale;
-
-        ctx->skeletonData = spSkeletonJson_readSkeletonData(json, (const char *)skeletonData);
-        if (!ctx->skeletonData) {
-            if (json->error)
-                snprintf(ctx->error, sizeof(ctx->error), "%s", json->error);
-            else
-                snprintf(ctx->error, sizeof(ctx->error), "cannot read skeleton json from memory");
-            spSkeletonJson_dispose(json);
-            return ctx;
-        }
-        spSkeletonJson_dispose(json);
-    } else {
-        /* skel 二进制：spSkeletonBinary 内部处理 hash/版本等文件头（3.7+） */
-        spSkeletonBinary *binary = spSkeletonBinary_create(ctx->atlas);
-        binary->scale = scale;
-
-        ctx->skeletonData = spSkeletonBinary_readSkeletonData(binary, skeletonData, skeletonLen);
-        if (!ctx->skeletonData) {
-            if (binary->error)
-                snprintf(ctx->error, sizeof(ctx->error), "%s", binary->error);
-            else
-                snprintf(ctx->error, sizeof(ctx->error), "cannot read skeleton skel from memory");
-            spSkeletonBinary_dispose(binary);
-            return ctx;
-        }
-        spSkeletonBinary_dispose(binary);
-    }
-
-    ctx->stateData = spAnimationStateData_create(ctx->skeletonData);
-    ctx->state = spAnimationState_create(ctx->stateData);
-    ctx->skeleton = spSkeleton_create(ctx->skeletonData);
-    spSkeleton_setToSetupPose(ctx->skeleton);
-    SP_R_UPDATE_WORLD(ctx->skeleton);
-
-    /* 挂上事件转发 listener（同 spR_create） */
-    ctx->state->listener = _spR_forwardListener;
-    ctx->state->rendererObject = ctx;
-    /* 裁剪器：渲染循环（collectDrawItems/buildMesh）复用一个实例 */
-    ctx->clipper = spSkeletonClipping_create();
+    ctx->ownsData = 1;
+    ctx->atlas = data.atlas;
+    ctx->skeletonData = data.skeletonData;
+    _spR_createRuntime(ctx);
     return ctx;
+}
+
+/* 共享数据层导出：解析一次，供多个运行时共享（方案 B）。 */
+
+SP_R_API void *spR_loadData(const char *jsonPath, const char *atlasPath, float scale) {
+    spRData *data = calloc(1, sizeof(spRData));
+    if (!data) return NULL;
+    /* world Y points down, matches Ren'Py screen coordinates */
+    spBone_setYDown(1);
+    if (!_spR_parseDataFile(data, jsonPath, atlasPath, scale)) return data; /* error 已写 */
+    return data;
+}
+
+SP_R_API void *spR_loadDataMem(const unsigned char *skeletonData, int skeletonLen,
+                               const unsigned char *atlasData, int atlasLen, float scale) {
+    spRData *data = calloc(1, sizeof(spRData));
+    if (!data) return NULL;
+    /* world Y points down, matches Ren'Py screen coordinates */
+    spBone_setYDown(1);
+    if (!_spR_parseDataMem(data, skeletonData, skeletonLen, atlasData, atlasLen, scale)) return data; /* error 已写 */
+    return data;
+}
+
+SP_R_API const char *spR_dataError(void *vdata) {
+    spRData *data = vdata;
+    return data ? data->error : "";
+}
+
+/* 从共享 data 创建运行时 ctx（data 不归 ctx 所有，spR_dispose 不释放它）。 */
+SP_R_API void *spR_createSkeleton(void *vdata) {
+    spRData *data = vdata;
+    spRContext *ctx = calloc(1, sizeof(spRContext));
+    if (!ctx) return NULL;
+    if (!data || !data->atlas || !data->skeletonData) {
+        snprintf(ctx->error, sizeof(ctx->error), "spine data not loaded or invalid");
+        return ctx;
+    }
+    /* world Y points down, matches Ren'Py screen coordinates */
+    spBone_setYDown(1);
+    ctx->ownsData = 0;
+    ctx->atlas = data->atlas;
+    ctx->skeletonData = data->skeletonData;
+    _spR_createRuntime(ctx);
+    return ctx;
+}
+
+SP_R_API void spR_disposeData(void *vdata) {
+    spRData *data = vdata;
+    if (!data) return;
+    if (data->skeletonData) spSkeletonData_dispose(data->skeletonData);
+    if (data->atlas) spAtlas_dispose(data->atlas);
+    free(data);
 }
 
 SP_R_API const char *spR_error(void *vctx) {
@@ -319,8 +419,12 @@ SP_R_API void spR_dispose(void *vctx) {
     if (ctx->state) spAnimationState_dispose(ctx->state);
     if (ctx->stateData) spAnimationStateData_dispose(ctx->stateData);
     if (ctx->skeleton) spSkeleton_dispose(ctx->skeleton);
-    if (ctx->skeletonData) spSkeletonData_dispose(ctx->skeletonData);
-    if (ctx->atlas) spAtlas_dispose(ctx->atlas);
+    /* atlas/skeletonData 属于共享数据层：只有 ownsData（spR_create 旧路径）
+     * 才在此连带释放；spR_createSkeleton 路径由 spR_disposeData 统一管理。 */
+    if (ctx->ownsData) {
+        if (ctx->skeletonData) spSkeletonData_dispose(ctx->skeletonData);
+        if (ctx->atlas) spAtlas_dispose(ctx->atlas);
+    }
     free(ctx);
 }
 
