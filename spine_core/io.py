@@ -27,7 +27,7 @@ def _read_bytes(path):
         try:
             gamedir = renpy.config.gamedir
             if path.startswith(gamedir):
-                rel = path[len(gamedir):].lstrip("/\\")
+                rel = path[len(gamedir):].lstrip("/\\").replace("\\", "/")
                 with renpy.loader.load(rel, tl=False) as f:
                     return f.read()
         except Exception:
