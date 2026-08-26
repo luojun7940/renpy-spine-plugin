@@ -21,6 +21,26 @@ import spine_core
 from .outline import _draw_rect_outline
 
 
+# Spine blendMode -> Ren'Py blend_func property 参数（0=normal 1=additive
+# 2=multiply 3=screen）。Ren'Py 内置 gl_blend_func 配置只有 normal/add/
+# multiply/min/max（config.py），screen 需自定义：
+#   (GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+# 混合常量按预乘 alpha（PMA）图集 + 预乘输出 shader 选配：add=GL_ONE,GL_ONE、
+# multiply=GL_DST_COLOR,GL_ONE_MINUS_SRC_ALPHA（与 live2dmodel.pyx 一致）。
+# Normal 不设 property（引擎默认 premultiplied 混合，与单 mesh 旧路径相同）。
+try:
+    from renpy.uguu import (  # type: ignore
+        GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+        GL_ONE_MINUS_SRC_COLOR, GL_ZERO, GL_DST_COLOR)
+    _BLEND_FUNCS = {
+        1: (GL_FUNC_ADD, GL_ONE, GL_ONE, GL_FUNC_ADD, GL_ZERO, GL_ONE),
+        2: (GL_FUNC_ADD, GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_FUNC_ADD, GL_ZERO, GL_ONE),
+        3: (GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_FUNC_ADD, GL_ONE, GL_ONE_MINUS_SRC_ALPHA),
+    }
+except Exception:
+    _BLEND_FUNCS = {}
+
+
 # 方案 A：合成图纹理共享缓存。key = (atlas 绝对路径, premultiplied)，
 # value = [texture, atlas_w, atlas_h, offsets, page_size, meta, refcount]。
 # 同一图集的合成纹理只构建一次，多实例引用计数共享（_ensure_atlas 借出、
@@ -170,6 +190,9 @@ class RenderMixin:
         if self._atlas_texture is not None:
             return
 
+        import pygame
+        from renpy.display import pgrender
+
         # 共享缓存：命中则复用合成图与其元数据（引用 +1）
         cache_key = (os.path.abspath(self.model.atlas_path), self.premultiplied)
         entry = _ATLAS_CACHE.get(cache_key)
@@ -182,9 +205,6 @@ class RenderMixin:
             self._atlas_page_size = dict(entry[4])
             self._atlas_meta = entry[5]
             return
-
-        import pygame
-        from renpy.display import pgrender
 
         images = []
         for name in self.model.pages:
@@ -237,32 +257,35 @@ class RenderMixin:
         ]
 
     def _build_mesh(self, min_x, min_y, zoom):
-        """把所有附件合并进一个 Mesh2（共享合成图纹理），单次 draw call。
+        """把所有附件按 blendMode 分段切成多个 Mesh2（共享合成图纹理）。
 
-        顶点/uv/颜色/索引全部由 C 层 spR_buildMesh 直接算进预分配缓冲
-        （跳过 Python 逐顶点循环与 DrawItem 中间对象），Python 只做一次
-        切片 memcpy 上传；Mesh2 固定容量分配一次，每帧覆盖数据复用。
+        顶点/uv/颜色/索引全部由 C 层 spR_buildMeshEx 直接算进预分配缓冲
+        （跳过 Python 逐顶点循环与 DrawItem 中间对象），Python 只做按段的
+        切片 memcpy 上传。每段独立 Mesh2：三角形数据段内覆盖、互不干扰
+        （段间不能共用一个 Mesh2 —— set_triangle_data 是全量覆盖，后段会把
+        前段的三角形冲掉）。Mesh2 容量固定分配一次、每帧覆盖数据复用。
 
-        mesh 附件：worldVertices/uvs/triangles 原样并入
-        region 附件：4 角世界坐标为顶点、4 对 uv 为纹理坐标，
-          补三角形 [0,1,2, 0,2,3]，视为一个四边形 mesh
+        segment 三角形引用的是全局顶点池（跨段共享），因此每段 Mesh2 的
+        geometry/attributes 上传全量顶点，仅 triangle 按段范围切片。
 
-        uv 方向约定：region uvs 与 mesh_uvs 同为 y-up（v=0 底部），
-        与合成图采样方向一致，直接映射即可（不可再翻转 v）。
-
-        返回 Mesh2；无有效数据返回 None。
+        返回 segments = [(Mesh2, blend_mode)]，按 drawOrder 保序；无有效
+        数据为空。段数 ≤1 且 normal（含旧 DLL 无分段信息）时返回单段，
+        render 主路径走单 mesh 一次 draw call 旧路径。
         """
         from renpy.gl2.gl2mesh2 import Mesh2
         from renpy.gl2.gl2mesh import AttributeLayout
 
         offs, pw, ph = self._atlas_meta
-        nv, nt, cap = self.model.build_mesh(
+        nv, nt, cap, blend_modes, seg_starts = self.model.build_mesh(
             min_x, min_y, zoom, offs, pw, ph, self._atlas_w, self._atlas_h)
         if nv == 0:
-            return None
+            return []
 
-        # 复用 Mesh2：容量不足（模型扩容）或首次使用时按 cap 分配
-        if self._mesh is None or self._mesh_cap < cap:
+        geo, attrs, tris = self.model.mesh_data(nv, nt)
+
+        # 复用 Mesh2 缓冲池：容量不足（模型扩容）或首次使用时按 cap 分配
+        n_mesh = max(len(blend_modes), 1)
+        if not self._meshes or self._mesh_cap < cap:
             if self._mesh_layout is None:
                 # 自定义顶点布局：a_tex_coord(2) + a_color(4)，stride=6。
                 # a_color 承载附件×slot×skeleton 乘积颜色（0~1 RGBA），供 shader 染色。
@@ -270,15 +293,31 @@ class RenderMixin:
                 layout.add_attribute("a_tex_coord", 2)
                 layout.add_attribute("a_color", 4)
                 self._mesh_layout = layout
-            self._mesh = Mesh2(self._mesh_layout, cap, cap * 2)
+            self._meshes = [
+                Mesh2(self._mesh_layout, cap, cap * 2) for _ in range(n_mesh)]
             self._mesh_cap = cap
+        elif len(self._meshes) < n_mesh:
+            # 段数变多（此前无特效槽的动画切到带特效槽的动画）：补 Mesh2
+            self._meshes += [
+                Mesh2(self._mesh_layout, cap, cap * 2)
+                for _ in range(n_mesh - len(self._meshes))]
 
-        geo, attrs, tris = self.model.mesh_data(nv, nt)
-        m = self._mesh
-        m.set_geometry_data(geo)
-        m.set_attribute_data(attrs)
-        m.set_triangle_data(tris)
-        return m
+        if not blend_modes:
+            # 旧 DLL / 无分段信息：单 mesh 整段上传（原先行为）
+            m = self._meshes[0]
+            m.set_geometry_data(geo)
+            m.set_attribute_data(attrs)
+            m.set_triangle_data(tris)
+            return [(m, 0)]
+
+        out = []
+        for i, bm in enumerate(blend_modes):
+            m = self._meshes[i]
+            m.set_geometry_data(geo)
+            m.set_attribute_data(attrs)
+            m.set_triangle_data(tris[seg_starts[i] * 3:seg_starts[i + 1] * 3])
+            out.append((m, bm))
+        return out
 
     def get_placement(self):
         """屏幕布局：origin_tight 锚点补偿 + 调试拖动偏移，不动 align。
@@ -427,8 +466,8 @@ class RenderMixin:
             return Render(1, 1)
         rv = Render(rv_w, rv_h)
 
-        # ---- 全部附件（region + mesh）统一并入 Mesh2 单次 draw call ----
-        # region 附件由 C 层 spR_buildMesh 转成 4 顶点四边形；顶点颜色（附件×
+        # ---- 全部附件（region + mesh）按 blendMode 分段绘制 ----
+        # region 附件由 C 层 spR_buildMeshEx 转成 4 顶点四边形；顶点颜色（附件×
         # slot×skeleton 乘积）经 a_color 顶点通道进入 spine.texture_color shader，
         # 在 fragment 中与纹理相乘实现染色。rot90 由显式 uv 配对天然正确处理。
         self._ensure_atlas()
@@ -440,13 +479,33 @@ class RenderMixin:
         # 原点居中改由 get_placement 的布局补偿实现（render 无需改动）。
         # 参考包围盒/缩放/Render 尺寸全部创建时锁定，切换动画/皮肤不变化，
         # 角色原地变姿势不瞬移。
-        mesh = self._build_mesh(render_min_x, render_min_y, eff_zoom)
-        if mesh is not None:
-            # 合成图纹理作为 tex0（main=True）；mesh 用 a_tex_coord 采样，
-            # fragment 乘 a_color 完成 slot/skeleton 染色
-            rv.blit(self._atlas_texture, (0, 0), main=True)
-            rv.add_shader("spine.texture_color")
-            rv.mesh = mesh
+        segments = self._build_mesh(render_min_x, render_min_y, eff_zoom)
+        if segments:
+            if len(segments) == 1 and segments[0][1] == 0:
+                # 单段 normal：单 mesh 一次 draw call（与旧路径一致）
+                mesh, _ = segments[0]
+                # 合成图纹理作为 tex0（main=True）；mesh 用 a_tex_coord 采样，
+                # fragment 乘 a_color 完成 slot/skeleton 染色
+                rv.blit(self._atlas_texture, (0, 0), main=True)
+                rv.add_shader("spine.texture_color")
+                rv.mesh = mesh
+            else:
+                # 多段（或单段非 normal）：外层 Render 无 mesh，每段一个带
+                # mesh + shader + blend_func property 的子 Render，按 drawOrder
+                # 顺序叠加（live2d 同款组合模式；Ren'Py 的 Render.mesh 只能挂
+                # 一个 Mesh2，无 per-mesh blend 属性，只能靠子 Render 分 blend）。
+                # 每段子 Render 持有独立 Mesh2，blend_func 由 gl2draw 在绘制时
+                # 临时切换混合状态并随后恢复，各段互不干扰。
+                for mesh, bm in segments:
+                    sub = Render(rv_w, rv_h)
+                    # 所有段共享同一张合成图纹理（UV 已按合成图归一化）
+                    sub.blit(self._atlas_texture, (0, 0), main=True)
+                    sub.add_shader("spine.texture_color")
+                    sub.mesh = mesh
+                    blend = _BLEND_FUNCS.get(bm)
+                    if blend is not None:
+                        sub.add_property("blend_func", blend)
+                    rv.blit(sub, (0, 0))
 
         # 请求每帧重绘：Ren'Py 按需渲染，不请求 redraw 则 render() 只调用一次，
         # model.update(dt) 不会推进，动画停在第一帧

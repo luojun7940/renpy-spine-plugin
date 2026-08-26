@@ -118,6 +118,7 @@ EXPORTS
     spR_addAnimation
     spR_addEmptyAnimation
     spR_buildMesh
+    spR_buildMeshEx
     spR_clearTrack
     spR_clearTracks
     spR_collectBounds

@@ -111,8 +111,9 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self._atlas_page_size = {} # 页名 -> (宽, 高)
         # 供 C 层 spR_buildMesh 用的图集元数据（页索引 -> 偏移/页宽/页高）
         self._atlas_meta = None    # (offsets, page_w, page_h) ctypes float 数组
-        # 复用 Mesh2（固定容量分配一次，每帧覆盖数据）与其布局
-        self._mesh = None
+        # 复用 Mesh2 缓冲池（固定容量分配一次，每帧覆盖数据；按 blendMode
+        # 分段时每段一个 Mesh2，见 render._build_mesh）与其布局
+        self._meshes = []
         self._mesh_cap = 0
         self._mesh_layout = None
         # 已释放标记：dispose() 置位后 render 返回空 Render，防止过渡期间误渲染崩溃
@@ -324,7 +325,7 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         for k in ("model", "version", "_last_st", "_ref_bbox", "_ref_bbox_done",
                   "_atlas_base", "_atlas_texture", "_atlas_w", "_atlas_h",
                   "_atlas_offsets", "_atlas_page_size", "_atlas_meta",
-                  "_mesh", "_mesh_cap", "_mesh_layout", "_finalize"):
+                  "_meshes", "_mesh_cap", "_mesh_layout", "_finalize"):
             state.pop(k, None)
         # _auto_release 标志随 state 保存（weakref.finalize 不可 pickle，已剥离，
         # __setstate__ 重建后重新注册）
@@ -395,7 +396,7 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self._atlas_offsets = {}
         self._atlas_page_size = {}
         self._atlas_meta = None
-        self._mesh = None
+        self._meshes = []
         self._mesh_cap = 0
         self._mesh_layout = None
         # 皮肤恢复：组合皮肤优先重放 combine_skins（合成名不在骨架数据里，
@@ -488,7 +489,7 @@ class SpineDisplayable(RenderMixin, DebugMixin, Displayable):
         self._atlas_meta = None
         self._atlas_offsets = {}
         self._atlas_page_size = {}
-        self._mesh = None
+        self._meshes = []
         self._mesh_cap = 0
         self._mesh_layout = None
 

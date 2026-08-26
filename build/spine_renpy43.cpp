@@ -37,6 +37,9 @@
 #define SP_R_API extern "C"
 #endif
 
+/* spR_buildMeshEx 段容量不足时的哨兵返回值（负数，不会与 -(所需顶点数) 混淆） */
+#define SP_R_NEED_SEGMENTS (-0x10000000)
+
 /* 4.3 的 updateWorldTransform 需要 physics 参数（Physics_Update） */
 #define SP_R_UPDATE_WORLD(s) spine_skeleton_update_world_transform((s), SPINE_PHYSICS_UPDATE)
 
@@ -1522,12 +1525,14 @@ SP_R_API int spR_collectBounds(void *vctx, float *minX, float *minY, float *maxX
  *
  * 返回顶点数（>=0）；无可见附件返回 0；缓冲不足返回 -(所需顶点数)。
  * outTriangles 写出实际三角形数。 */
-SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
-                           const float *atlasOffsets, const float *atlasPageW,
-                           const float *atlasPageH, int pageCount,
-                           float atlasW, float atlasH,
-                           float *geo, float *attrs, unsigned short *tris,
-                           int maxVerts, int maxTris, int *outTriangles) {
+SP_R_API int spR_buildMeshEx(void *vctx, float minX, float minY, float zoom,
+                             const float *atlasOffsets, const float *atlasPageW,
+                             const float *atlasPageH, int pageCount,
+                             float atlasW, float atlasH,
+                             float *geo, float *attrs, unsigned short *tris,
+                             int maxVerts, int maxTris, int *outTriangles,
+                             int *outBlendModes, int *outSegStartTriangles,
+                             int maxSegments, int *outSegmentCount) {
     spRContext *ctx = (spRContext *)vctx;
     spine_skeleton skel;
     spine_draw_order dor;
@@ -1535,6 +1540,10 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
     spine_slot *slots;
     size_t n;
     int i, vi = 0, ti = 0;
+    /* 分段状态：blendMode 相同的连续槽聚为一段（保 drawOrder 序，不重排）。
+     * pending=1 表示下一个实际产出三角形的槽需要开新段（裁剪附件/空槽不算）。 */
+    int do_segs = (maxSegments > 0 && outBlendModes && outSegStartTriangles);
+    int seg_count = 0, cur_blend = -1, pending = do_segs ? 1 : 0;
     if (!ctx || !ctx->skeleton) return 0;
     /* 与 spR_collectDrawItems 相同：清掉上一帧残留的未闭合裁剪（见该函数注释） */
     spine_skeleton_clipping_clip_end_2(ctx->clipper);
@@ -1565,6 +1574,12 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
                                                spine_attachment_cast_to_clipping_attachment(att));
             continue;
         }
+        /* blendMode 分段：槽的混合模式变化时，置 pending，下一个产出槽开新段 */
+        if (do_segs) {
+            spine_slot_data sd = spine_slot_get_data(slot);
+            int bm = (int)spine_slot_data_get_blend_mode(sd);
+            if (bm != cur_blend) { cur_blend = bm; pending = 1; }
+        }
 
         if (spine_rtti_is_exactly(rtti, spine_region_attachment_rtti())) {
             spine_region_attachment region = spine_attachment_cast_to_region_attachment(att);
@@ -1573,7 +1588,6 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             spine_texture_region treg = spine_sequence_get_region(seq, seqIndex);
             spine_array_float offs, uvs;
             float verts[8];
-            if (vi + 4 > maxVerts || ti + 2 > maxTris) return -(vi + 4);
             page = (treg) ? (int)(intptr_t)spine_texture_region_get_renderer_object(treg) : -1;
             if (page < 0 || page >= pageCount) {
                 spine_skeleton_clipping_clip_end_1(ctx->clipper, slot);
@@ -1582,6 +1596,14 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             offX = atlasOffsets[page];
             pw = atlasPageW[page];
             ph = atlasPageH[page];
+            if (vi + 4 > maxVerts || ti + 2 > maxTris) return -(vi + 4);
+            if (pending) {
+                if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                outSegStartTriangles[seg_count] = ti;
+                outBlendModes[seg_count] = cur_blend;
+                seg_count++;
+                pending = 0;
+            }
             offs = spine_region_attachment_get_offsets(region, pose);
             spine_region_attachment_compute_world_vertices_1(region, slot,
                                                              spine_array_float_buffer(offs),
@@ -1608,6 +1630,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
                 vcount = vlen / 2;
                 ttri = tcount / 3;
                 if (vi + vcount > maxVerts || ti + ttri > maxTris) return -(vi + vcount);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 {
                     const float *cvb = spine_array_float_buffer(cv);
                     const float *cub = spine_array_float_buffer(cu);
@@ -1663,7 +1692,6 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             size_t tcount = spine_array_unsigned_short_size(spine_mesh_attachment_get_triangles(mesh));
             int ttri = (int)(tcount / 3);
             float *wv;
-            if (vi + vcount > maxVerts || ti + ttri > maxTris) return -(vi + vcount);
             page = (treg) ? (int)(intptr_t)spine_texture_region_get_renderer_object(treg) : -1;
             if (page < 0 || page >= pageCount) {
                 spine_skeleton_clipping_clip_end_1(ctx->clipper, slot);
@@ -1672,6 +1700,14 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             offX = atlasOffsets[page];
             pw = atlasPageW[page];
             ph = atlasPageH[page];
+            if (vi + vcount > maxVerts || ti + ttri > maxTris) return -(vi + vcount);
+            if (pending) {
+                if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                outSegStartTriangles[seg_count] = ti;
+                outBlendModes[seg_count] = cur_blend;
+                seg_count++;
+                pending = 0;
+            }
             wv = _spR_tmpVerts(ctx, (int)vlen);
             if (!wv) return 0;
             spine_vertex_attachment_compute_world_vertices_1(va, skel, slot, 0, vlen, wv, 0, 2);
@@ -1698,6 +1734,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
                 cvcount = cvlen / 2;
                 cttri = ctcount / 3;
                 if (vi + cvcount > maxVerts || ti + cttri > maxTris) return -(vi + cvcount);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 {
                     const float *cvb = spine_array_float_buffer(cv);
                     const float *cub = spine_array_float_buffer(cu);
@@ -1741,5 +1784,23 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
         /* 其余附件类型（bounding box/path/point）不渲染 */
     }
     if (outTriangles) *outTriangles = ti;
+    if (do_segs) {
+        if (outSegmentCount) *outSegmentCount = seg_count;
+        if (seg_count > 0) outSegStartTriangles[seg_count] = ti;
+    }
     return vi;
+}
+
+/* 旧 ABI 包装：不输出段信息（等价于 maxSegments=0 的 buildMeshEx，行为不变） */
+SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
+                           const float *atlasOffsets, const float *atlasPageW,
+                           const float *atlasPageH, int pageCount,
+                           float atlasW, float atlasH,
+                           float *geo, float *attrs, unsigned short *tris,
+                           int maxVerts, int maxTris, int *outTriangles) {
+    return spR_buildMeshEx(vctx, minX, minY, zoom,
+                           atlasOffsets, atlasPageW, atlasPageH, pageCount,
+                           atlasW, atlasH,
+                           geo, attrs, tris, maxVerts, maxTris, outTriangles,
+                           NULL, NULL, 0, NULL);
 }

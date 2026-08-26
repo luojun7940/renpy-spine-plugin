@@ -16,6 +16,11 @@ from .state import TrackStateMixin
 from .hit import HitMixin
 
 
+# spR_buildMeshEx 段容量不足时的哨兵返回值（与 -(所需顶点数) 区分，顶点数
+# 不可能达到 2^28 量级；见 build/spine_renpy.c 的 SP_R_NEED_SEGMENTS）。
+SP_R_NEED_SEGMENTS = -0x10000000
+
+
 # ---------------------------------------------------------------------------
 # 模型封装
 # ---------------------------------------------------------------------------
@@ -84,6 +89,10 @@ class SpineModel(TrackStateMixin, HitMixin):
         self._mesh_attrs = None      # (cap*6) float
         self._mesh_tris = None       # (cap*2*3) ushort
         self._mesh_vert_cap = 0      # 当前顶点容量（三角形容量 = cap*2）
+        # blendMode 分段输出缓冲（spR_buildMeshEx；按需扩容）
+        self._seg_cap = 0            # 当前段容量（初始由 build_mesh 惰性分配）
+        self._seg_blend = None       # (seg_cap) int，每段 blend mode
+        self._seg_start = None       # (seg_cap+1) int，每段起点三角形 + 末位总三角形数
 
         self._listener_cb = None   # ctypes 回调对象（持有引用防止被 GC）
         self._callback = None      # 用户回调（dict -> 用户）
@@ -457,16 +466,25 @@ class SpineModel(TrackStateMixin, HitMixin):
         return mnx.value, mny.value, mxx.value, mxy.value
 
     def build_mesh(self, min_x, min_y, zoom, offsets, page_w, page_h, atlas_w, atlas_h):
-        """C 层把所有附件合并进单 Mesh2 数据缓冲（一次 draw call）。
+        """C 层把所有附件按 blendMode 分段合并进 mesh 数据缓冲。
 
         offsets/page_w/page_h 为图集合成图元数据（ctypes float 数组，按页索引，
         与 _pages 顺序一致，见 spine_displayable._ensure_atlas 的构建）。
         顶点/uv/颜色/索引全部在 C 层算好，写入内部预分配缓冲。
 
-        返回 (nv, nt, cap)：nv/nt 为实际顶点/三角形数（0 表示无可见附件），
-        cap 为当前顶点容量（缓冲不足时自动扩容后重试，Mesh2 需按 cap 分配）。
+        返回 (nv, nt, cap, blend_modes, seg_starts)：
+        - nv/nt 为实际顶点/三角形数（0 表示无可见附件）；
+        - cap 为当前顶点容量（缓冲不足时自动扩容后重试，Mesh2 需按 cap 分配）；
+        - blend_modes 为每段的 spine blendMode 枚举（0=normal 1=additive
+          2=multiply 3=screen），按 drawOrder 保序分段（blend 相同且相邻聚组）；
+        - seg_starts 长度 = len(blend_modes)+1，[i] 为第 i 段起始三角形索引
+          （0 起），末位为总三角形数 nt；段 i 的三角形为 tris[seg_starts[i]*3 :
+          seg_starts[i+1]*3]（顶点索引跨段共享全局顶点池）。
+        - 旧 DLL（无 spR_buildMeshEx）返回 blend_modes=[]、seg_starts=[]，
+          渲染走单 mesh 旧路径。
         """
         n_pages = len(self._pages)
+        ex = hasattr(self._lib._lib, "spR_buildMeshEx")
         while True:
             if self._mesh_geo is None:
                 # 初始容量：8192 顶点 / 16384 三角形（单模型绰绰有余，按需扩容）
@@ -474,14 +492,39 @@ class SpineModel(TrackStateMixin, HitMixin):
                 self._mesh_geo = (ctypes.c_float * (8192 * 2))()
                 self._mesh_attrs = (ctypes.c_float * (8192 * 6))()
                 self._mesh_tris = (ctypes.c_ushort * (8192 * 2 * 3))()
+                # 段缓冲初始 16 段（特效槽通常只有几个，按需倍增扩容）
+                self._seg_cap = 16
+                self._seg_blend = (ctypes.c_int * self._seg_cap)()
+                self._seg_start = (ctypes.c_int * (self._seg_cap + 1))()
             nt = (ctypes.c_int)()
-            r = self._lib._lib.spR_buildMesh(
-                self._ctx, min_x, min_y, zoom,
-                offsets, page_w, page_h, n_pages, atlas_w, atlas_h,
-                self._mesh_geo, self._mesh_attrs, self._mesh_tris,
-                self._mesh_vert_cap, self._mesh_vert_cap * 2, ctypes.byref(nt))
-            if r >= 0:
-                return r, nt.value, self._mesh_vert_cap
+            if ex:
+                seg_count = (ctypes.c_int)()
+                r = self._lib._lib.spR_buildMeshEx(
+                    self._ctx, min_x, min_y, zoom,
+                    offsets, page_w, page_h, n_pages, atlas_w, atlas_h,
+                    self._mesh_geo, self._mesh_attrs, self._mesh_tris,
+                    self._mesh_vert_cap, self._mesh_vert_cap * 2, ctypes.byref(nt),
+                    self._seg_blend, self._seg_start, self._seg_cap,
+                    ctypes.byref(seg_count))
+                if r == SP_R_NEED_SEGMENTS:
+                    # 段容量不足：仅扩容段数组重试（几何缓冲不动）
+                    self._seg_cap *= 2
+                    self._seg_blend = (ctypes.c_int * self._seg_cap)()
+                    self._seg_start = (ctypes.c_int * (self._seg_cap + 1))()
+                    continue
+                if r >= 0:
+                    n_segs = seg_count.value
+                    return (r, nt.value, self._mesh_vert_cap,
+                            [self._seg_blend[i] for i in range(n_segs)],
+                            [self._seg_start[i] for i in range(n_segs + 1)])
+            else:
+                r = self._lib._lib.spR_buildMesh(
+                    self._ctx, min_x, min_y, zoom,
+                    offsets, page_w, page_h, n_pages, atlas_w, atlas_h,
+                    self._mesh_geo, self._mesh_attrs, self._mesh_tris,
+                    self._mesh_vert_cap, self._mesh_vert_cap * 2, ctypes.byref(nt))
+                if r >= 0:
+                    return r, nt.value, self._mesh_vert_cap, [], []
             # 空间不足：r 为 -(所需顶点数)，扩容后重试
             need = -r
             new_cap = max(need * 2, 1024)

@@ -20,6 +20,10 @@
 #define SP_R_API
 #endif
 
+/* spR_buildMeshEx 段容量不足时的哨兵返回值（负数，不会与 -(所需顶点数) 混淆，
+ * 因为所需顶点数不可能达到 2^28 量级） */
+#define SP_R_NEED_SEGMENTS (-0x10000000)
+
 /* ---------------- version differences ---------------- */
 
 #if SPINE_RENPY_VER >= 42
@@ -1377,15 +1381,21 @@ SP_R_API int spR_collectBounds(void *vctx, float *minX, float *minY, float *maxX
  *
  * 返回顶点数（>=0）；无可见附件返回 0；缓冲不足返回 -(所需顶点数)。
  * outTriangles 写出实际三角形数。 */
-SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
-                           const float *atlasOffsets, const float *atlasPageW,
-                           const float *atlasPageH, int pageCount,
-                           float atlasW, float atlasH,
-                           float *geo, float *attrs, unsigned short *tris,
-                           int maxVerts, int maxTris, int *outTriangles) {
+SP_R_API int spR_buildMeshEx(void *vctx, float minX, float minY, float zoom,
+                             const float *atlasOffsets, const float *atlasPageW,
+                             const float *atlasPageH, int pageCount,
+                             float atlasW, float atlasH,
+                             float *geo, float *attrs, unsigned short *tris,
+                             int maxVerts, int maxTris, int *outTriangles,
+                             int *outBlendModes, int *outSegStartTriangles,
+                             int maxSegments, int *outSegmentCount) {
     spRContext *ctx = vctx;
     spSkeleton *skel;
     int i, vi = 0, ti = 0;
+    /* 分段状态：blendMode 相同的连续槽聚为一段（保 drawOrder 序，不重排）。
+     * pending=1 表示下一个实际产出三角形的槽需要开新段（裁剪附件/空槽不算）。 */
+    int do_segs = (maxSegments > 0 && outBlendModes && outSegStartTriangles);
+    int seg_count = 0, cur_blend = -1, pending = do_segs ? 1 : 0;
     if (!ctx || !ctx->skeleton) return 0;
     /* 与 spR_collectDrawItems 相同：清掉上一帧残留的未闭合裁剪（见该函数注释） */
     spSkeletonClipping_clipEnd2(ctx->clipper);
@@ -1405,6 +1415,11 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
         if (att->type == SP_ATTACHMENT_CLIPPING) {
             spSkeletonClipping_clipStart(ctx->clipper, slot, (spClippingAttachment *)att);
             continue;
+        }
+        /* blendMode 分段：槽的混合模式变化时，置 pending，下一个产出槽开新段 */
+        if (do_segs) {
+            int bm = (int)slot->data->blendMode;
+            if (bm != cur_blend) { cur_blend = bm; pending = 1; }
         }
         sc = &slot->color;
         kc = &skel->color;
@@ -1441,6 +1456,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
                 vcount = vlen / 2;
                 ttri = tcount / 3;
                 if (vi + vcount > maxVerts || ti + ttri > maxTris) return -(vi + vcount);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 for (j = 0; j < vcount; j++) {
                     geo[vi * 2] = (cv->items[j * 2] - minX) * zoom;
                     geo[vi * 2 + 1] = (cv->items[j * 2 + 1] - minY) * zoom;
@@ -1458,6 +1480,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             } else {
                 /* 原逻辑：region 补四边形 [0,1,2, 0,2,3] */
                 if (vi + 4 > maxVerts || ti + 2 > maxTris) return -(vi + 4);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 for (j = 0; j < 4; j++) {
                     geo[vi * 2] = (verts[j * 2] - minX) * zoom;
                     geo[vi * 2 + 1] = (verts[j * 2 + 1] - minY) * zoom;
@@ -1518,6 +1547,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
                 cvcount = cvlen / 2;
                 cttri = ctcount / 3;
                 if (vi + cvcount > maxVerts || ti + cttri > maxTris) return -(vi + cvcount);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 for (j = 0; j < cvcount; j++) {
                     geo[vi * 2] = (cv->items[j * 2] - minX) * zoom;
                     geo[vi * 2 + 1] = (cv->items[j * 2 + 1] - minY) * zoom;
@@ -1535,6 +1571,13 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
             } else {
                 /* 原逻辑：mesh 附件原样 + 顶点偏移 */
                 if (vi + vcount > maxVerts || ti + ttri > maxTris) return -(vi + vcount);
+                if (pending) {
+                    if (seg_count >= maxSegments) return SP_R_NEED_SEGMENTS;
+                    outSegStartTriangles[seg_count] = ti;
+                    outBlendModes[seg_count] = cur_blend;
+                    seg_count++;
+                    pending = 0;
+                }
                 for (j = 0; j < vcount; j++) {
                     geo[vi * 2] = (wv[j * 2] - minX) * zoom;
                     geo[vi * 2 + 1] = (wv[j * 2 + 1] - minY) * zoom;
@@ -1555,7 +1598,25 @@ SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
         /* 其余附件类型（bounding box/path/point）不渲染 */
     }
     if (outTriangles) *outTriangles = ti;
+    if (do_segs) {
+        if (outSegmentCount) *outSegmentCount = seg_count;
+        if (seg_count > 0) outSegStartTriangles[seg_count] = ti;
+    }
     return vi;
+}
+
+/* 旧 ABI 包装：不输出段信息（等价于 maxSegments=0 的 buildMeshEx，行为不变） */
+SP_R_API int spR_buildMesh(void *vctx, float minX, float minY, float zoom,
+                           const float *atlasOffsets, const float *atlasPageW,
+                           const float *atlasPageH, int pageCount,
+                           float atlasW, float atlasH,
+                           float *geo, float *attrs, unsigned short *tris,
+                           int maxVerts, int maxTris, int *outTriangles) {
+    return spR_buildMeshEx(vctx, minX, minY, zoom,
+                           atlasOffsets, atlasPageW, atlasPageH, pageCount,
+                           atlasW, atlasH,
+                           geo, attrs, tris, maxVerts, maxTris, outTriangles,
+                           NULL, NULL, 0, NULL);
 }
 
 /* copy the image file name of the index-th page (relative to atlas dir). returns 1 on success. */

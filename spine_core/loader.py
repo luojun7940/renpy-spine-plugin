@@ -201,6 +201,23 @@ class SpineLib:
             ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
         lib.spR_buildMesh.restype = ctypes.c_int
 
+        # spR_buildMesh 的扩展版：按 slot->data->blendMode 分段输出段信息
+        # （outBlendModes[] 每段 blend 值 0=Normal 1=Additive 2=Multiply 3=Screen；
+        #  outSegStartTriangles[] 每段起始三角形，末位追加总三角形数，需 maxSegments+1 容量；
+        #  *outSegmentCount 实际段数。段容量不足返回 SP_R_NEED_SEGMENTS。）
+        if hasattr(lib, "spR_buildMeshEx"):
+            lib.spR_buildMeshEx.argtypes = [
+                ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+                ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+                ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                ctypes.c_float, ctypes.c_float,
+                ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
+                ctypes.POINTER(ctypes.c_ushort),
+                ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            lib.spR_buildMeshEx.restype = ctypes.c_int
+
         # listener 用 c_void_p 接收回调指针，否则取消监听（传 None）会触发
         # ctypes 的类型检查错误（CFUNCTYPE 参数不接受 None）
         lib.spR_setListener.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
