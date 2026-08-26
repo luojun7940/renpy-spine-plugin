@@ -31,7 +31,7 @@ class SpineLib:
         except OSError as e:
             raise FileNotFoundError(
                 "无法加载 %s（版本 %s）：%s。安卓上请把 libspine%s.so 放到 "
-                "game/spine-renpy/so/ 目录并重新打包（运行时自动解压加载），"
+                "game/renpy-spine-plugin/so/ 目录并重新打包（运行时自动解压加载），"
                 "或打进 APK native libs（lib/<abi>/）目录。"
                 % (path, version, e, version))
 
@@ -274,7 +274,7 @@ class SpineLib:
         if env:
             return env
         if IS_ANDROID:
-            # 安卓：优先从 game/spine-renpy/so/{abi}/spine{ver}.so 解压到
+            # 安卓：优先从 game/renpy-spine-plugin/so/{abi}/spine{ver}.so 解压到
             # app 私有目录再 dlopen（APK assets 是虚拟 FS，无真实路径，
             # linker 无法直接加载）；失败时退回 jniLibs 裸名。
             name = "spine%s.so" % version
@@ -294,11 +294,11 @@ class SpineLib:
                 except Exception as abi_e:
                     abi = "err:%r" % abi_e
                 raise Exception(
-                    "spine-renpy: so 解压失败 version=%s name=%s abi=%s\n%s"
+                    "renpy-spine-plugin: so 解压失败 version=%s name=%s abi=%s\n%s"
                     % (version, name, abi, traceback.format_exc()))
         name = DLL_BY_VERSION[version]
         here = os.path.dirname(os.path.abspath(__file__))
-        root = os.path.dirname(here)  # spine_core 包上层 = spine-renpy/（lib/ 与 build/ 所在）
+        root = os.path.dirname(here)  # spine_core 包上层 = renpy-spine-plugin/（lib/ 与 build/ 所在）
         for base in (here, os.path.join(root, "lib"),
                      os.path.join(root, "build")):
             p = os.path.join(base, name)
@@ -325,7 +325,7 @@ def _android_so_dir():
     if not hasattr(_android_so_dir, "cached"):
         import android  # type: ignore
         base = android.activity.getFilesDir().getAbsolutePath()
-        _android_so_dir.cached = os.path.join(base, "spine-renpy", "so")
+        _android_so_dir.cached = os.path.join(base, "renpy-spine-plugin", "so")
     return _android_so_dir.cached
 
 
@@ -333,7 +333,7 @@ def _extract_android_so(abi, name):
     """从虚拟 FS 读 spine so 字节，解压到 app 私有目录后返回真实路径。
 
     abi 为当前运行 ABI（如 "arm64-v8a"），so 位于
-    game/spine-renpy/so/{abi}/ 下（与用户部署结构一致）。
+    game/renpy-spine-plugin/so/{abi}/ 下（与用户部署结构一致）。
     APK 里 game 目录是虚拟 FS，须用 renpy.loader.load 按相对 gamedir 的
     路径读字节（_read_bytes 只对以 gamedir 开头的绝对虚拟路径生效）。
     4.3 依赖 libc++_shared.so：so 目录若带它则一并解压并预加载，
@@ -342,7 +342,7 @@ def _extract_android_so(abi, name):
     """
 
     def load_bytes(fn):
-        with renpy.loader.load(os.path.join("spine-renpy", "so", abi, fn), tl=False) as f:
+        with renpy.loader.load(os.path.join("renpy-spine-plugin", "so", abi, fn), tl=False) as f:
             return f.read()
 
     data = load_bytes(name)
