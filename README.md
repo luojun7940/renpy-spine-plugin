@@ -1,7 +1,5 @@
 # renpy-spine-plugin
 
-**注：AI构史，谨慎使用。**
-
 在 Ren'Py 中播放 Spine 动画的运行时插件。通过 ctypes 桥接多版本 spine-runtime 编译的 DLL（3.5 ~ 4.3），自动按骨架文件内的版本号派发对应 DLL，无需手动配置。骨架格式支持 **JSON 文本** 与 **skel 二进制**（3.5+，均按文件内容自动识别版本）。
 
 
