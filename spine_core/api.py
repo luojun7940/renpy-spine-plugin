@@ -7,7 +7,7 @@ import os
 from typing import Dict, Optional, Tuple
 
 from .io import _read_bytes
-from .versions import SUPPORTED_VERSIONS, detect_version
+from .versions import SUPPORTED_VERSIONS, detect_version, patch_legacy_version
 from .loader import SpineLib
 from .model import SpineModel
 
@@ -61,7 +61,8 @@ def acquire_data(lib: SpineLib, json_path: str, atlas_path: str, scale: float) -
         return entry[0], True
     if hasattr(lib_api, "spR_loadDataMem"):
         # 内存版（安卓虚拟文件系统）：Python 读好字节传入
-        skel_data = _read_bytes(json_path)
+        # 骨架字节先做 3.8.75 -> 3.8.89 兼容改写（spine-c 3.8 拒绝前者）
+        skel_data = patch_legacy_version(_read_bytes(json_path))
         atlas_data = _read_bytes(atlas_path)
         skel_buf = ctypes.create_string_buffer(skel_data)
         atlas_buf = ctypes.create_string_buffer(atlas_data)

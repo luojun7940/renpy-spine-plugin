@@ -19,6 +19,28 @@ DLL_BY_VERSION = {"%s" % v: "spine%s.dll" % v for v in SUPPORTED_VERSIONS}
 
 
 # ---------------------------------------------------------------------------
+# 骨架版本串兼容改写
+# ---------------------------------------------------------------------------
+
+# spine-c 3.8 的定制构建硬编码拒绝精确版本串 "3.8.75"（SkeletonJson.c /
+# SkeletonBinary.c 中的 strcmp 检查），而同为 6 字节的 "3.8.89" 不被拒绝、
+# 数据格式完全兼容，故在 Python 层做等长改写后再交给 C 层。
+_LEGACY_VERSION = b"3.8.75"
+_LEGACY_VERSION_REPLACEMENT = b"3.8.89"
+
+
+def patch_legacy_version(data: bytes) -> bytes:
+    """把骨架字节中的 "3.8.75" 等长改写为 "3.8.89"，规避 spine-c 3.8 的版本拒绝。
+
+    两个版本串长度一致，JSON 文本的字节偏移与 skel 文件头的 varint 长度前缀
+    均无需调整，因此可直接按字节替换。未出现该版本串时原样返回。
+    """
+    if _LEGACY_VERSION not in data:
+        return data
+    return data.replace(_LEGACY_VERSION, _LEGACY_VERSION_REPLACEMENT)
+
+
+# ---------------------------------------------------------------------------
 # 版本检测
 # ---------------------------------------------------------------------------
 

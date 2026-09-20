@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from .io import _read_bytes
 from .structs import DrawItem, EVENT_NAMES, RListenerCB, spRDrawItem
+from .versions import patch_legacy_version
 from .loader import SpineLib
 from .state import TrackStateMixin
 from .hit import HitMixin
@@ -51,7 +52,8 @@ class SpineModel(TrackStateMixin, HitMixin):
                 raise RuntimeError("spR_createSkeleton 失败")
         elif hasattr(lib._lib, "spR_createMem"):
             # 内存版：安卓虚拟文件系统（APK assets）无法 fopen，Python 读好字节传入
-            skel_data = _read_bytes(json_path)
+            # 骨架字节先做 3.8.75 -> 3.8.89 兼容改写（spine-c 3.8 拒绝前者）
+            skel_data = patch_legacy_version(_read_bytes(json_path))
             atlas_data = _read_bytes(atlas_path)
             skel_buf = ctypes.create_string_buffer(skel_data)
             atlas_buf = ctypes.create_string_buffer(atlas_data)
